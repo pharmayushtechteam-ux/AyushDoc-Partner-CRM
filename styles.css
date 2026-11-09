@@ -2768,6 +2768,12 @@ body.mode-tablet .data-table tbody td .entity-name {
 }
 
 @media (max-width: 767px) {
+  .panel-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
   .filter-tabs,
   .panel-header .filter-tabs {
     width: 100%;
@@ -2783,6 +2789,7 @@ body.mode-tablet .data-table tbody td .entity-name {
     font-size: 12.5px;
     text-align: center;
     justify-content: center;
+    white-space: nowrap;
   }
 
   .panel-header > .btn {
@@ -2794,6 +2801,12 @@ body.mode-tablet .data-table tbody td .entity-name {
 body.mode-mobile .templates-grid,
 body.mode-tablet .templates-grid {
   grid-template-columns: 1fr;
+}
+
+body.mode-mobile .panel-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
 body.mode-mobile .filter-tabs,
@@ -2811,6 +2824,7 @@ body.mode-mobile .panel-header .filter-tab {
   font-size: 12.5px;
   text-align: center;
   justify-content: center;
+  white-space: nowrap;
 }
 
 body.mode-mobile .panel-header > .btn {

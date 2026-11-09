@@ -702,23 +702,20 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
 
       <div class="panel-card">
-        <div class="panel-header">
-          <div class="panel-title">
-            <h2>WhatsApp Broadcast Campaigns (${state.campaigns.length})</h2>
+        <div class="panel-header broadcast-toolbar">
+          <div class="filter-tabs" id="campaignSegmentTabs">
+            ${['All', 'Doctors', 'Clinics', 'Hospitals'].map(seg => {
+              const count = seg === 'All'
+                ? state.campaigns.length
+                : state.campaigns.filter(c => c.segment.toLowerCase().includes(seg.toLowerCase())).length;
+              return `
+                <button class="filter-tab ${filterSegment === seg ? 'active' : ''}" data-seg="${seg}">
+                  ${seg === 'All' ? `All Broadcasts (${count})` : `${seg} (${count})`}
+                </button>
+              `;
+            }).join('')}
           </div>
           <button class="btn btn-outline" id="goToReportsBtn">📊 View Analytics Reports →</button>
-        </div>
-        <div class="filter-tabs" id="campaignSegmentTabs" style="margin-bottom: 14px;">
-          ${['All', 'Doctors', 'Clinics', 'Hospitals'].map(seg => {
-            const count = seg === 'All'
-              ? state.campaigns.length
-              : state.campaigns.filter(c => c.segment.toLowerCase().includes(seg.toLowerCase())).length;
-            return `
-              <button class="filter-tab ${filterSegment === seg ? 'active' : ''}" data-seg="${seg}">
-                ${seg === 'All' ? `All Broadcasts (${count})` : `${seg} (${count})`}
-              </button>
-            `;
-          }).join('')}
         </div>
         <div class="table-no-scroll">
           <table class="data-table">
