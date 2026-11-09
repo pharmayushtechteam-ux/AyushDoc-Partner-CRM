@@ -764,6 +764,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-bottom: 16px;
 }
 
@@ -1213,12 +1215,16 @@ body {
 
 .filter-tabs {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
 .filter-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: #f1f5f9;
   border: 1px solid #e2e8f0;
   color: #334155;
@@ -1227,6 +1233,7 @@ body {
   font-family: inherit;
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -2684,7 +2691,40 @@ body.mode-tablet .data-table tbody td .entity-name {
   }
 }
 
+@media (max-width: 767px) {
+  .panel-header .filter-tabs {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+
+  .panel-header .filter-tab {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 12.5px;
+    text-align: center;
+  }
+
+  .panel-header > .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
 body.mode-mobile .templates-grid,
 body.mode-tablet .templates-grid {
   grid-template-columns: 1fr;
+}
+
+body.mode-mobile .panel-header .filter-tabs {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+body.mode-mobile .panel-header > .btn {
+  width: 100%;
+  justify-content: center;
 }

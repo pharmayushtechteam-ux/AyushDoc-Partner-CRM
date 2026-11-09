@@ -704,11 +704,16 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="panel-card">
         <div class="panel-header">
           <div class="filter-tabs" id="campaignSegmentTabs">
-            ${['All', 'Doctors', 'Clinics', 'Hospitals'].map(seg => `
-              <button class="filter-tab ${filterSegment === seg ? 'active' : ''}" data-seg="${seg}">
-                ${seg === 'All' ? `All Broadcasts (${state.campaigns.length})` : seg}
-              </button>
-            `).join('')}
+            ${['All', 'Doctors', 'Clinics', 'Hospitals'].map(seg => {
+              const count = seg === 'All'
+                ? state.campaigns.length
+                : state.campaigns.filter(c => c.segment.toLowerCase().includes(seg.toLowerCase())).length;
+              return `
+                <button class="filter-tab ${filterSegment === seg ? 'active' : ''}" data-seg="${seg}">
+                  ${seg === 'All' ? `All Broadcasts (${count})` : `${seg} (${count})`}
+                </button>
+              `;
+            }).join('')}
           </div>
           <button class="btn btn-outline" id="goToReportsBtn">📊 View Analytics Reports →</button>
         </div>
