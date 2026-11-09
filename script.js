@@ -1638,9 +1638,9 @@ document.addEventListener('DOMContentLoaded', () => {
           <label>WhatsApp / Phone Number *</label>
           <input type="text" name="phone" placeholder="+91 98470 00000" value="+91 " required />
         </div>
-        <div class="modal-actions" style="justify-content:space-between;">
+        <div class="modal-actions modal-actions-split">
           <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
-          <div style="display:flex;gap:8px;">
+          <div class="modal-actions-right">
             <button type="submit" class="btn btn-primary" data-send-wa="false">Save Partner</button>
             <button type="submit" class="btn btn-whatsapp" id="saveAndWaBtn">Save &amp; WhatsApp</button>
           </div>
@@ -1745,9 +1745,9 @@ document.addEventListener('DOMContentLoaded', () => {
             <option value="New Lead">New Lead</option>
           </select>
         </div>
-        <div class="modal-actions" style="justify-content:space-between;">
+        <div class="modal-actions modal-actions-split">
           <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
-          <div style="display:flex;gap:8px;">
+          <div class="modal-actions-right">
             <button type="submit" class="btn btn-primary">Schedule Follow-up</button>
             <button type="submit" class="btn btn-whatsapp" id="scheduleAndWaBtn">Schedule &amp; WhatsApp</button>
           </div>
@@ -1931,8 +1931,8 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
         <div class="form-group">
           <label>WhatsApp Number to Share in Message (Contact / Support Number)</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="waSharePhone" value="${defaultShareNumber}" placeholder="Enter WhatsApp number to share..." style="flex:1;" />
+          <div class="share-num-row">
+            <input type="text" id="waSharePhone" value="${defaultShareNumber}" placeholder="Enter WhatsApp number to share..." style="flex:1;min-width:0;" />
             <button type="button" class="filter-tab" id="insertShareNumBtn" style="white-space:nowrap;background:#eff6ff;color:#0b57d0;border-color:#bfdbfe;">+ Insert Number</button>
           </div>
         </div>
@@ -1945,9 +1945,9 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
           <textarea id="waMessageText" rows="4" required>Namaste ${partnerName}, greetings from AyushDoc+ Partner CRM! You can reach our dedicated Partner Onboarding desk directly on WhatsApp at ${defaultShareNumber} (https://wa.me/${defaultShareNumber.replace(/[^0-9]/g, '')}) for quick verification and support.</textarea>
         </div>
-        <div class="modal-actions" style="justify-content:space-between;">
+        <div class="modal-actions modal-actions-split">
           <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
-          <div style="display:flex;gap:8px;">
+          <div class="modal-actions-right">
             <button type="button" class="btn btn-primary" id="sendViaWabaBtn">Send via CRM API</button>
             <button type="submit" class="btn btn-whatsapp">Open WhatsApp &amp; Send</button>
           </div>
