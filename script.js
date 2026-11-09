@@ -1145,7 +1145,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('manageWabaBtn')?.addEventListener('click', openWabaStatusModal);
-  document.getElementById('topWaStatusBtn')?.addEventListener('click', openWabaStatusModal);
+  document.getElementById('topWaStatusBtn')?.remove();
+  document.querySelectorAll('.wa-connected-pill').forEach(el => el.remove());
 
   // ---- TOPBAR NOTIFICATIONS & ADMIN PROFILE DROPDOWNS ----
   const notifBtn = document.getElementById('notifBtn');

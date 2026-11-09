@@ -403,17 +403,9 @@ body {
   gap: 20px;
 }
 
-.wa-connected-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
-  padding: 6px 12px;
-  border-radius: 9px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #1e293b;
+.wa-connected-pill,
+#topWaStatusBtn {
+  display: none !important;
 }
 
 .wa-pill-icon {
