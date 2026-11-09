@@ -1228,18 +1228,12 @@ document.addEventListener('DOMContentLoaded', () => {
         <strong>${adminName} — ${adminOrg}</strong>
         <span style="font-size:11.5px;color:#64748b;">admin@ayushdoc.in</span>
       </div>
-      <button class="menu-list-item" id="openCustomerPortalBtn">🌐 Open Customer Portal</button>
       <button class="menu-list-item" id="editProfileMenuBtn">👤 Edit Admin Profile</button>
       <button class="menu-list-item" id="teamMenuBtn">👥 Team &amp; Roles</button>
       <button class="menu-list-item" id="wabaSettingsMenuBtn">⚙️ WABA &amp; CRM Settings</button>
       <button class="menu-list-item" id="resetDemoDataBtn">🔄 Reset Demo Data</button>
       <button class="menu-list-item danger" id="signOutMenuBtn">🚪 Switch Account</button>
     `;
-
-    document.getElementById('openCustomerPortalBtn')?.addEventListener('click', () => {
-      userDropdown.classList.remove('open');
-      window.location.href = 'customer.html';
-    });
 
     document.getElementById('editProfileMenuBtn')?.addEventListener('click', () => {
       userDropdown.classList.remove('open');
