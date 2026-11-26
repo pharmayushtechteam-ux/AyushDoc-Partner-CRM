@@ -41,9 +41,139 @@ document.addEventListener('DOMContentLoaded', () => {
     { initials: 'VS', color: 'avatar-orange', name: 'Vishnu S', role: 'Support & Verification Exec', email: 'vishnu@ayushdoc.in', region: 'Trivandrum', active: 'Online' }
   ];
 
-  // Load saved partners/campaigns from localStorage if available
+  // ---- LEAD STATUS & SETTLEMENT HELPERS ----
+  const LEAD_STATUSES = ['New Lead', 'Contacted', 'Interested', 'Meeting', 'Onboarded', 'Lost'];
+
+  const STATUS_BADGE_MAP = {
+    'New Lead': 'badge-newlead',
+    'Contacted': 'badge-contacted',
+    'Interested': 'badge-interested',
+    'Meeting': 'badge-meeting',
+    'Onboarded': 'badge-completed',
+    'Lost': 'badge-lost'
+  };
+
+  const STATUS_SELECT_CLASS = {
+    'New Lead': 'st-new',
+    'Contacted': 'st-contacted',
+    'Interested': 'st-interested',
+    'Meeting': 'st-meeting',
+    'Onboarded': 'st-onboarded',
+    'Lost': 'st-lost'
+  };
+
+  function formatINR(val) {
+    const num = Number(val) || 0;
+    return '₹' + Math.round(num).toLocaleString('en-IN');
+  }
+
+  function todayISO() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function computeSettlementMetrics(s) {
+    const dealValue = Math.max(0, Number(s?.dealValue) || 0);
+    const commissionPct = Math.max(0, Math.min(100, Number(s?.commissionPct ?? 10)));
+    const commissionAmount = Math.round((dealValue * commissionPct) / 100);
+    const paidAmount = Math.max(0, Math.min(dealValue, Number(s?.paidAmount) || 0));
+    const pendingAmount = Math.max(0, dealValue - paidAmount);
+    let settlementStatus = 'Unsettled';
+    if (dealValue > 0 && pendingAmount === 0) settlementStatus = 'Settled';
+    else if (paidAmount > 0 && pendingAmount > 0) settlementStatus = 'Partial';
+    const settledPct = dealValue > 0 ? Math.round((paidAmount / dealValue) * 100) : 0;
+    return { dealValue, commissionPct, commissionAmount, paidAmount, pendingAmount, settlementStatus, settledPct };
+  }
+
+  function normalizePartner(p, idx = 0) {
+    const sources = ['WhatsApp Campaign', 'Website', 'CSV Upload', 'Field Referral', 'Manual Entry'];
+    const owners = ['Rahul Krishnan', 'Sneha Nair', 'Arjun Menon', 'Kiran Panicker', 'Neha Raj'];
+    const baseDates = [
+      '2026-11-24', '2026-11-22', '2026-11-20', '2026-11-18', '2026-11-15',
+      '2026-11-12', '2026-11-10', '2026-11-08', '2026-11-06', '2026-11-04',
+      '2026-11-02', '2026-10-30', '2026-10-27', '2026-10-24', '2026-10-20', '2026-10-16'
+    ];
+    const defaultDeal = p.type === 'Hospitals' ? 120000 : p.type === 'Clinics' ? 55000 : 25000;
+    const defaultPaid = p.status === 'Onboarded'
+      ? defaultDeal
+      : p.status === 'Meeting'
+        ? Math.round(defaultDeal * 0.5)
+        : p.status === 'Interested'
+          ? Math.round(defaultDeal * 0.25)
+          : 0;
+
+    const existingSettlement = p.settlement || {};
+    const dealValue = existingSettlement.dealValue !== undefined ? Number(existingSettlement.dealValue) : defaultDeal;
+    const paidAmount = existingSettlement.paidAmount !== undefined ? Number(existingSettlement.paidAmount) : defaultPaid;
+    const commissionPct = existingSettlement.commissionPct !== undefined ? Number(existingSettlement.commissionPct) : 12;
+    const createdDate = p.createdDate || baseDates[idx % baseDates.length];
+    const defaultTx = paidAmount > 0 && !existingSettlement.transactions
+      ? [{
+          id: `TX-${p.id || idx}-1`,
+          date: createdDate,
+          amount: paidAmount,
+          mode: p.status === 'Onboarded' ? 'NEFT/RTGS' : 'UPI',
+          utr: `AYU${String(261100 + (idx * 37)).slice(-6)}`,
+          note: paidAmount >= dealValue ? 'Full onboarding settlement received' : 'Initial advance settlement'
+        }]
+      : (existingSettlement.transactions || []);
+
+    const metrics = computeSettlementMetrics({ dealValue, commissionPct, paidAmount });
+    const status = LEAD_STATUSES.includes(p.status) ? p.status : 'New Lead';
+
+    return {
+      ...p,
+      status,
+      badge: STATUS_BADGE_MAP[status] || 'badge-newlead',
+      leadSource: p.leadSource || sources[idx % sources.length],
+      assignedTo: p.assignedTo || owners[idx % owners.length],
+      createdDate,
+      statusHistory: Array.isArray(p.statusHistory) && p.statusHistory.length > 0
+        ? p.statusHistory
+        : [{ status, date: createdDate, note: 'Lead recorded in AyushDoc+ CRM' }],
+      settlement: {
+        ...metrics,
+        paymentMode: existingSettlement.paymentMode || (defaultTx[0]?.mode || ''),
+        utrNumber: existingSettlement.utrNumber || (defaultTx[0]?.utr || ''),
+        settledDate: existingSettlement.settledDate || (metrics.settlementStatus === 'Settled' ? createdDate : ''),
+        notes: existingSettlement.notes || '',
+        transactions: defaultTx
+      }
+    };
+  }
+
+  function deduplicatePartners(list) {
+    const seen = new Set();
+    const out = [];
+    for (const p of list) {
+      const nameKey = (p.name || '').trim().toLowerCase();
+      const cityKey = (p.city || '').trim().toLowerCase();
+      const phoneKey = (p.phone || '').replace(/[^0-9]/g, '');
+      const keyByNameCity = `${nameKey}|${cityKey}`;
+      const keyByNamePhone = phoneKey.length >= 7 ? `${nameKey}|${phoneKey}` : '';
+      if (seen.has(keyByNameCity) || (keyByNamePhone && seen.has(keyByNamePhone))) {
+        continue;
+      }
+      seen.add(keyByNameCity);
+      if (keyByNamePhone) seen.add(keyByNamePhone);
+      out.push(p);
+    }
+    return out;
+  }
+
+  // Load saved partners/campaigns/uploads from localStorage if available
   const savedPartners = JSON.parse(localStorage.getItem('ayush_crm_partners') || 'null');
   const savedCampaigns = JSON.parse(localStorage.getItem('ayush_crm_campaigns') || 'null');
+  const savedUploads = JSON.parse(localStorage.getItem('ayush_crm_uploads') || 'null');
+  const normalizedInitialPartners = (savedPartners || defaultPartners).map((p, i) => normalizePartner(p, i));
+  const cleanedInitialPartners = deduplicatePartners(normalizedInitialPartners);
+  if (savedPartners && cleanedInitialPartners.length !== savedPartners.length) {
+    localStorage.setItem('ayush_crm_partners', JSON.stringify(cleanedInitialPartners));
+  }
+
+  const defaultUploadHistory = [
+    { id: 1, date: '2026-11-22 10:15 AM', fileName: 'kerala_ayurveda_doctors_nov.csv', source: 'CSV Upload', imported: 8, skipped: 1 },
+    { id: 2, date: '2026-11-15 04:40 PM', fileName: 'kochi_clinics_batch.csv', source: 'CSV Upload', imported: 5, skipped: 0 }
+  ];
 
   const state = {
     currentView: 'dashboard',
@@ -65,10 +195,33 @@ document.addEventListener('DOMContentLoaded', () => {
       campaignsPage: 1,
       campaignsPageSize: 5,
       teamPage: 1,
-      teamPageSize: 5
+      teamPageSize: 5,
+      settlementsPage: 1,
+      settlementsPageSize: 8,
+      reportsPage: 1,
+      reportsPageSize: 8
     },
-    partners: savedPartners || defaultPartners,
+    leadsFilter: {
+      status: 'All',
+      search: ''
+    },
+    settlementFilter: {
+      status: 'All',
+      search: ''
+    },
+    reportFilter: {
+      status: 'All',
+      category: 'All',
+      settlement: 'All',
+      source: 'All',
+      fromDate: '',
+      toDate: ''
+    },
+    pendingUploadRows: [],
+    pendingUploadFileName: '',
+    partners: cleanedInitialPartners,
     campaigns: savedCampaigns || defaultCampaigns,
+    uploadHistory: savedUploads || defaultUploadHistory,
     team: defaultTeam,
     automations: [
       { id: 1, title: 'Instant WhatsApp Welcome on New Lead', desc: 'Automatically send an official WABA brochure & onboarding link when a new Doctor/Clinic lead is added.', enabled: true },
@@ -81,6 +234,52 @@ document.addEventListener('DOMContentLoaded', () => {
   function persistState() {
     localStorage.setItem('ayush_crm_partners', JSON.stringify(state.partners));
     localStorage.setItem('ayush_crm_campaigns', JSON.stringify(state.campaigns));
+    localStorage.setItem('ayush_crm_uploads', JSON.stringify(state.uploadHistory));
+  }
+
+  function updateLeadStatus(partnerId, newStatus, note = '', preserveFollowup = false) {
+    const partner = state.partners.find(p => p.id === partnerId);
+    if (!partner || !LEAD_STATUSES.includes(newStatus)) return;
+    const prevStatus = partner.status;
+    partner.status = newStatus;
+    partner.badge = STATUS_BADGE_MAP[newStatus] || 'badge-newlead';
+    if (newStatus === 'Onboarded' && !preserveFollowup) partner.followup = 'Completed';
+    if (!Array.isArray(partner.statusHistory)) partner.statusHistory = [];
+    partner.statusHistory.unshift({
+      status: newStatus,
+      date: todayISO(),
+      note: note || `Status updated from ${prevStatus} to ${newStatus}`
+    });
+    persistState();
+    syncDashboardCounts();
+    renderDashboardFollowups();
+  }
+
+  function refreshCurrentView() {
+    syncDashboardCounts();
+    renderDashboardFollowups();
+    if (state.currentView === 'leads') renderLeadsView();
+    else if (state.currentView === 'settlements') renderSettlementsView();
+    else if (state.currentView === 'leads-reports') renderLeadsReportsView();
+    else if (state.currentView === 'leads-upload') renderLeadsUploadView();
+    else if (state.currentView === 'partners-all') renderPartnersView('All', globalSearchInput?.value?.trim() || '');
+    else if (state.currentView === 'doctors') renderPartnersView('Doctors', globalSearchInput?.value?.trim() || '');
+    else if (state.currentView === 'clinics') renderPartnersView('Clinics', globalSearchInput?.value?.trim() || '');
+    else if (state.currentView === 'hospitals') renderPartnersView('Hospitals', globalSearchInput?.value?.trim() || '');
+    else if (state.currentView === 'followups') renderFollowupsView();
+  }
+
+  function syncDashboardCounts() {
+    const setEl = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val.toLocaleString();
+    };
+    const countByStatus = (st) => state.partners.filter(p => p.status === st).length;
+    setEl('pipeNewLeads', countByStatus('New Lead'));
+    setEl('pipeContacted', countByStatus('Contacted'));
+    setEl('pipeInterested', countByStatus('Interested'));
+    setEl('pipeMeeting', countByStatus('Meeting'));
+    setEl('pipeOnboarded', countByStatus('Onboarded'));
   }
 
   // ---- DOM ELEMENTS ----
@@ -336,6 +535,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   renderDashboardFollowups();
   renderDashboardCampaigns();
+  syncDashboardCounts();
 
   // ---- VIEW NAVIGATION ----
   const viewMeta = {
@@ -360,8 +560,20 @@ document.addEventListener('DOMContentLoaded', () => {
       sub: 'Manage multi-specialty AYUSH hospitals, inpatient facilities, and institutional tie-ups.'
     },
     'leads': {
-      title: 'Leads &amp; <span class="text-green">Onboarding Pipeline</span>',
-      sub: 'Track every partner from initial lead capture through WhatsApp outreach to onboarding.'
+      title: 'Leads &amp; <span class="text-green">Status Pipeline</span>',
+      sub: 'Update lead stages inline, inspect status history, and track every lead through onboarding & settlement.'
+    },
+    'leads-upload': {
+      title: 'Bulk <span class="text-green">Leads Upload</span>',
+      sub: 'Upload CSV/TSV lead sheets or paste rows, validate duplicates, and import directly into your CRM.'
+    },
+    'settlements': {
+      title: 'Leads Full <span class="text-green">Settlement Tracking</span>',
+      sub: 'Track deal values, partner commissions, partial/full payouts, UTR references, and pending balances.'
+    },
+    'leads-reports': {
+      title: 'All Leads <span class="text-green">Reports &amp; Exports</span>',
+      sub: 'Filter leads by status, category, settlement state, source & date range — export to CSV, Excel, or PDF.'
     },
     'followups': {
       title: 'Scheduled <span class="text-green">Follow-ups</span>',
@@ -378,6 +590,10 @@ document.addEventListener('DOMContentLoaded', () => {
     'automation': {
       title: 'Workflow <span class="text-green">Automation</span>',
       sub: 'Configure automated WhatsApp triggers, lead assignment rules, and meeting reminders.'
+    },
+    'user-management': {
+      title: 'User <span class="text-green">Management &amp; Access Control</span>',
+      sub: 'Manage CRM users, roles, granular module permissions, departments, teams, and security audit logs.'
     },
     'team': {
       title: 'Team &amp; <span class="text-green">Role Management</span>',
@@ -447,9 +663,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 <th>Partner Name</th>
                 <th>Category</th>
                 <th>Specialty • City</th>
-                <th>Phone / WhatsApp</th>
+                <th>Phone</th>
                 <th>Next Follow-up</th>
-                <th>Pipeline Status</th>
+                <th>Status</th>
                 <th>Quick Actions</th>
               </tr>
             </thead>
@@ -467,8 +683,8 @@ document.addEventListener('DOMContentLoaded', () => {
                   </td>
                   <td data-label="Category"><strong>${p.type.slice(0, -1)}</strong></td>
                   <td data-label="Specialty • City">${p.specialty} • ${p.city}</td>
-                  <td data-label="Phone / WhatsApp">${p.phone}</td>
-                  <td data-label="Next Follow-up">📅 ${p.followup}</td>
+                  <td data-label="Phone / WhatsApp" style="white-space:nowrap;">${p.phone}</td>
+                  <td data-label="Next Follow-up" style="white-space:nowrap;">📅 ${p.followup}</td>
                   <td data-label="Status"><span class="status-badge ${p.badge}">${p.status}</span></td>
                   <td data-label="Action" class="td-action">
                     <div class="followup-actions">
@@ -503,39 +719,67 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // ---- LEADS & PIPELINE VIEW (WITH PAGINATED TABLE BELOW KANBAN) ----
+  // ---- LEADS & STATUS PIPELINE VIEW ----
   function renderLeadsView() {
     const stages = [
-      { name: 'New Leads', count: 286, key: 'New Lead', color: '#1d4ed8' },
-      { name: 'Contacted', count: 198, key: 'Contacted', color: '#0284c7' },
-      { name: 'Interested', count: 128, key: 'Interested', color: '#15803d' },
-      { name: 'Meeting', count: 62, key: 'Meeting', color: '#b45309' },
-      { name: 'Onboarded', count: 172, key: 'Onboarded', color: '#16a34a' }
+      { name: 'New Leads', key: 'New Lead', color: '#1d4ed8' },
+      { name: 'Contacted', key: 'Contacted', color: '#0284c7' },
+      { name: 'Interested', key: 'Interested', color: '#15803d' },
+      { name: 'Meeting', key: 'Meeting', color: '#b45309' },
+      { name: 'Onboarded', key: 'Onboarded', color: '#16a34a' }
     ];
 
-    const pager = paginateArray(state.partners, state.pagination.partnersPage, state.pagination.partnersPageSize);
+    const filteredLeads = state.partners.filter(p => {
+      const matchSt = state.leadsFilter.status === 'All' || p.status === state.leadsFilter.status;
+      const q = state.leadsFilter.search.trim().toLowerCase();
+      const matchQ = !q || matchesPartnerQuery(p, q) || (p.leadSource || '').toLowerCase().includes(q) || (p.assignedTo || '').toLowerCase().includes(q);
+      return matchSt && matchQ;
+    });
+
+    const pager = paginateArray(filteredLeads, state.pagination.partnersPage, state.pagination.partnersPageSize);
     state.pagination.partnersPage = pager.currentPage;
 
     viewDynamic.innerHTML = `
+      <div class="panel-card" style="padding:14px 18px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+          <div class="filter-tabs" id="leadsStatusTabs">
+            <button class="filter-tab ${state.leadsFilter.status === 'All' ? 'active' : ''}" data-lead-st="All">All (${state.partners.length})</button>
+            ${LEAD_STATUSES.map(st => {
+              const cnt = state.partners.filter(x => x.status === st).length;
+              return `<button class="filter-tab ${state.leadsFilter.status === st ? 'active' : ''}" data-lead-st="${st}">${st} (${cnt})</button>`;
+            }).join('')}
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-primary" id="leadsGoUploadBtn">📤 Upload Leads</button>
+            <button class="btn btn-outline" id="leadsGoSettleBtn">💳 Settlement Tracking</button>
+            <button class="btn btn-outline" id="leadsGoReportsBtn">📊 All Leads Report</button>
+          </div>
+        </div>
+      </div>
+
       <div class="kanban-grid">
         ${stages.map(s => {
-          const items = state.partners.filter(p => p.status === s.key).slice(0, 3);
+          const allStageItems = state.partners.filter(p => p.status === s.key);
+          const items = allStageItems.slice(0, 3);
           return `
             <div class="kanban-col">
               <div class="kanban-col-header" style="border-bottom-color:${s.color}">
                 <span>${s.name}</span>
-                <span class="status-badge badge-contacted">${s.count}</span>
+                <span class="status-badge badge-contacted">${allStageItems.length}</span>
               </div>
-              ${items.map(item => `
+              ${items.length === 0 ? `<div class="entity-sub" style="padding:12px 4px;text-align:center;">No leads in this stage</div>` : items.map(item => `
                 <div class="kanban-card">
                   <div class="kanban-card-title">${item.name}</div>
                   <div class="kanban-card-sub">${item.specialty} • ${item.city}</div>
+                  <div class="kanban-card-sub" style="color:#15803d;font-weight:600;">
+                    Deal: ${formatINR(item.settlement.dealValue)} • ${item.settlement.settlementStatus}
+                  </div>
                   <div class="kanban-card-foot">
                     <span>📅 ${item.followup}</span>
-                    <button class="wa-action-btn" style="padding:4px 9px;font-size:11.5px;" data-wa="${item.name}" data-wa-phone="${item.phone}">
-                      ${waSvgIcon}
-                      <span>WhatsApp</span>
-                    </button>
+                    <div style="display:flex;gap:5px;">
+                      <button type="button" class="action-pill-btn pill-green" data-open-settle="${item.id}" style="padding:3px 7px;font-size:11px;">₹ Settle</button>
+                      <button type="button" class="action-pill-btn pill-blue" data-open-lead="${item.id}" style="padding:3px 7px;font-size:11px;">Details</button>
+                    </div>
                   </div>
                 </div>
               `).join('')}
@@ -546,48 +790,73 @@ document.addEventListener('DOMContentLoaded', () => {
 
       <div class="panel-card">
         <div class="panel-header">
-          <div class="panel-title"><h2>Pipeline Leads Table (${state.partners.length})</h2></div>
+          <div class="panel-title"><h2>All Leads &amp; Status Management (${filteredLeads.length})</h2></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <input type="text" id="leadsInlineSearch" value="${state.leadsFilter.search}" placeholder="Search name, city, phone, source..." style="padding:7px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;min-width:265px;font-family:inherit;" />
+          </div>
         </div>
         <div class="table-no-scroll">
           <table class="data-table">
             <thead>
               <tr>
                 <th>Lead Name</th>
-                <th>Category</th>
-                <th>Specialty • City</th>
+                <th>Category &amp; Source</th>
                 <th>Phone</th>
-                <th>Stage</th>
+                <th>Lead Status (Live Update)</th>
+                <th>Settlement</th>
                 <th>Follow-up</th>
-                <th>Quick Actions</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              ${pager.pageItems.map(p => `
-                <tr>
-                  <td data-label="Lead Name" class="td-primary">
-                    <div class="followup-entity">
-                      <div class="avatar-circle ${p.color}">${p.initials}</div>
-                      <div class="entity-info">
-                        <div class="entity-name">${p.name}</div>
-                        <div class="entity-sub mobile-only-sub">${p.type.slice(0, -1)} • ${p.specialty} • ${p.city}</div>
+              ${pager.pageItems.length === 0 ? `
+                <tr><td colspan="7" style="text-align:center;padding:24px;color:#64748b;">No leads match the current filter.</td></tr>
+              ` : pager.pageItems.map(p => {
+                const stBadge = p.settlement.settlementStatus === 'Settled'
+                  ? 'badge-settled'
+                  : p.settlement.settlementStatus === 'Partial'
+                    ? 'badge-partial'
+                    : 'badge-unsettled';
+                return `
+                  <tr>
+                    <td data-label="Lead Name" class="td-primary">
+                      <div class="followup-entity">
+                        <div class="avatar-circle ${p.color}">${p.initials}</div>
+                        <div class="entity-info">
+                          <div class="entity-name">${p.name}</div>
+                          <div class="entity-sub">${p.specialty} • ${p.city}</div>
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  <td data-label="Category">${p.type.slice(0, -1)}</td>
-                  <td data-label="Specialty • City">${p.specialty} • ${p.city}</td>
-                  <td data-label="Phone">${p.phone}</td>
-                  <td data-label="Stage"><span class="status-badge ${p.badge}">${p.status}</span></td>
-                  <td data-label="Follow-up">📅 ${p.followup}</td>
-                  <td data-label="Action" class="td-action">
-                    <div class="followup-actions">
-                      <button class="wa-action-btn" data-wa="${p.name}" data-wa-phone="${p.phone}">
-                        ${waSvgIcon}
-                        <span>WhatsApp</span>
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              `).join('')}
+                    </td>
+                    <td data-label="Category & Source">
+                      <strong>${p.type.slice(0, -1)}</strong>
+                      <div class="entity-sub">${p.leadSource} • ${p.assignedTo}</div>
+                    </td>
+                    <td data-label="Phone">${p.phone}</td>
+                    <td data-label="Lead Status">
+                      <select class="inline-status-select ${STATUS_SELECT_CLASS[p.status] || 'st-new'}" data-status-lead-id="${p.id}">
+                        ${LEAD_STATUSES.map(st => `<option value="${st}" ${p.status === st ? 'selected' : ''}>${st}</option>`).join('')}
+                      </select>
+                    </td>
+                    <td data-label="Settlement">
+                      <div style="display:flex;flex-direction:column;gap:3px;align-items:flex-start;">
+                        <span class="status-badge ${stBadge}">${p.settlement.settlementStatus}</span>
+                        <span class="entity-sub">${formatINR(p.settlement.paidAmount)} / ${formatINR(p.settlement.dealValue)}</span>
+                      </div>
+                    </td>
+                    <td data-label="Follow-up">📅 ${p.followup}</td>
+                    <td data-label="Actions" class="td-action">
+                      <div class="followup-actions" style="flex-wrap:wrap;">
+                        <button class="action-pill-btn pill-green" data-open-settle="${p.id}">₹ Settle</button>
+                        <button class="action-pill-btn pill-blue" data-open-lead="${p.id}">History</button>
+                        <button class="icon-action-btn wa-btn" data-wa="${p.name}" data-wa-phone="${p.phone}" title="WhatsApp ${p.name}">
+                          ${waSvgIcon}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
             </tbody>
           </table>
         </div>
@@ -595,7 +864,1666 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
 
+    document.getElementById('leadsGoUploadBtn')?.addEventListener('click', () => switchView('leads-upload'));
+    document.getElementById('leadsGoSettleBtn')?.addEventListener('click', () => switchView('settlements'));
+    document.getElementById('leadsGoReportsBtn')?.addEventListener('click', () => switchView('leads-reports'));
+
+    viewDynamic.querySelectorAll('#leadsStatusTabs [data-lead-st]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.leadsFilter.status = btn.getAttribute('data-lead-st');
+        state.pagination.partnersPage = 1;
+        renderLeadsView();
+      });
+    });
+
+    const inlineSearch = document.getElementById('leadsInlineSearch');
+    if (inlineSearch) {
+      inlineSearch.addEventListener('input', (e) => {
+        state.leadsFilter.search = e.target.value;
+        state.pagination.partnersPage = 1;
+        renderLeadsView();
+        const el = document.getElementById('leadsInlineSearch');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    }
+
+    viewDynamic.querySelectorAll('[data-status-lead-id]').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const pid = Number(sel.getAttribute('data-status-lead-id'));
+        const newSt = sel.value;
+        const lead = state.partners.find(x => x.id === pid);
+        updateLeadStatus(pid, newSt);
+        showToast(`Updated ${lead?.name || 'Lead'} status to "${newSt}"`);
+        renderLeadsView();
+      });
+    });
+
+    viewDynamic.querySelectorAll('[data-open-settle]').forEach(btn => {
+      btn.addEventListener('click', () => openSettlementModal(Number(btn.getAttribute('data-open-settle'))));
+    });
+
+    viewDynamic.querySelectorAll('[data-open-lead]').forEach(btn => {
+      btn.addEventListener('click', () => openLeadDetailModal(Number(btn.getAttribute('data-open-lead'))));
+    });
+
     bindPaginationEvents(viewDynamic, 'leads', 'partnersPage', 'partnersPageSize', renderLeadsView);
+  }
+
+  // ---- LEADS UPLOAD VIEW (CSV / TSV / PASTE / DEMO BATCH) ----
+  function parseCSVText(text) {
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim().length > 0);
+    if (lines.length === 0) return [];
+
+    const delimiter = lines[0].includes('\t') && !lines[0].includes(',') ? '\t' : ',';
+    const parseLine = (line) => {
+      const cells = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+          else { inQuotes = !inQuotes; }
+        } else if (ch === delimiter && !inQuotes) {
+          cells.push(cur.trim());
+          cur = '';
+        } else {
+          cur += ch;
+        }
+      }
+      cells.push(cur.trim());
+      return cells;
+    };
+
+    const rawHeaders = parseLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    const hasHeader = rawHeaders.some(h => ['name', 'leadname', 'partnername', 'phone', 'whatsapp', 'city', 'specialty'].includes(h));
+    const startIdx = hasHeader ? 1 : 0;
+
+    const colIdx = (aliases, fallbackIdx) => {
+      if (!hasHeader) return fallbackIdx;
+      for (const a of aliases) {
+        const idx = rawHeaders.findIndex(h => h === a || h.includes(a));
+        if (idx !== -1) return idx;
+      }
+      return -1;
+    };
+
+    const idxName = colIdx(['leadname', 'partnername', 'name'], 0);
+    const idxType = colIdx(['category', 'type', 'partnertype'], 1);
+    const idxSpec = colIdx(['specialty', 'speciality', 'system', 'department'], 2);
+    const idxCity = colIdx(['city', 'location', 'district'], 3);
+    const idxPhone = colIdx(['phone', 'whatsapp', 'mobile', 'contact'], 4);
+    const idxStatus = colIdx(['status', 'stage', 'leadstatus'], 5);
+    const idxSource = colIdx(['source', 'leadsource'], 6);
+    const idxAssigned = colIdx(['assigned', 'owner', 'executive'], 7);
+    const idxDeal = colIdx(['dealvalue', 'deal', 'amount', 'totalvalue'], 8);
+    const idxPaid = colIdx(['paidamount', 'paid', 'settled'], 9);
+    const idxFollowup = colIdx(['followup', 'nextfollowup'], 10);
+
+    const existingPhones = new Set(state.partners.map(p => (p.phone || '').replace(/[^0-9]/g, '')));
+    const rows = [];
+
+    for (let i = startIdx; i < lines.length; i++) {
+      const cols = parseLine(lines[i]);
+      const get = (idx, def = '') => (idx >= 0 && idx < cols.length && cols[idx] !== '' ? cols[idx] : def);
+
+      const name = get(idxName, '');
+      const rawType = get(idxType, 'Doctors');
+      let type = 'Doctors';
+      if (/clinic/i.test(rawType)) type = 'Clinics';
+      else if (/hosp/i.test(rawType)) type = 'Hospitals';
+
+      const specialty = get(idxSpec, 'Ayurveda');
+      const city = get(idxCity, 'Kochi');
+      const phone = get(idxPhone, '');
+      const rawStatus = get(idxStatus, 'New Lead');
+      const status = LEAD_STATUSES.find(s => s.toLowerCase() === rawStatus.toLowerCase()) || 'New Lead';
+      const leadSource = get(idxSource, 'CSV Upload');
+      const assignedTo = get(idxAssigned, 'Rahul Krishnan');
+      const dealValue = Math.max(0, Number(String(get(idxDeal, type === 'Hospitals' ? '120000' : type === 'Clinics' ? '55000' : '25000')).replace(/[^0-9.]/g, '')) || 0);
+      const paidAmount = Math.max(0, Number(String(get(idxPaid, '0')).replace(/[^0-9.]/g, '')) || 0);
+      const followup = get(idxFollowup, 'Tomorrow, 11:00 AM');
+
+      const cleanPhone = phone.replace(/[^0-9]/g, '');
+      const isDuplicate = cleanPhone.length >= 7 && existingPhones.has(cleanPhone);
+      const errors = [];
+      if (!name) errors.push('Missing Name');
+      if (!phone || cleanPhone.length < 7) errors.push('Invalid Phone');
+
+      rows.push({
+        rowNum: i + 1,
+        name,
+        type,
+        specialty,
+        city,
+        phone,
+        status,
+        leadSource,
+        assignedTo,
+        dealValue,
+        paidAmount: Math.min(paidAmount, dealValue),
+        followup,
+        isDuplicate,
+        errors,
+        isValid: errors.length === 0
+      });
+    }
+    return rows;
+  }
+
+  function renderLeadsUploadView() {
+    const validRows = state.pendingUploadRows.filter(r => r.isValid);
+    const dupRows = state.pendingUploadRows.filter(r => r.isDuplicate);
+    const invalidRows = state.pendingUploadRows.filter(r => !r.isValid);
+
+    viewDynamic.innerHTML = `
+      <div class="upload-grid">
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Upload Leads File (CSV / Excel)</h2></div>
+            <button type="button" class="btn btn-outline" id="downloadSampleCsvBtn">📥 Download CSV Template</button>
+          </div>
+          <input type="file" id="leadsFileInput" accept=".csv,.tsv,.txt,.xls,.xlsx,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none;" />
+          <div class="upload-dropzone" id="leadsDropzone">
+            <div class="upload-icon-circle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <h3>Drop your CSV / Excel file here</h3>
+            <p>Supports <strong>.csv, .xlsx, .xls, .tsv, .txt</strong> with columns: Name, Category, Specialty, City, Phone, Status, Source, Assigned To, Deal Value, Paid Amount</p>
+            <div class="upload-actions-row">
+              <label for="leadsFileInput" class="btn btn-primary" id="browseCsvBtn" style="cursor:pointer;">Browse File</label>
+              <button type="button" class="btn btn-outline" id="loadDemoBatchBtn">⚡ Load 5 Sample Leads</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Quick Paste Bulk Leads</h2></div>
+            <button class="btn btn-outline" id="openSingleLeadFromUploadBtn">+ Add Single Lead</button>
+          </div>
+          <p class="entity-sub" style="margin-bottom:10px;">Paste comma-separated rows (header optional) and click <strong>Parse Rows</strong> to preview before importing.</p>
+          <textarea class="paste-box" id="pasteCsvInput" placeholder="Name,Category,Specialty,City,Phone,Status,Source,Assigned To,Deal Value,Paid Amount&#10;Dr. Kavya Nair,Doctors,Ayurveda,Kochi,+91 98471 22334,New Lead,CSV Upload,Rahul Krishnan,30000,10000"></textarea>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+            <button type="button" class="btn btn-outline" id="clearPasteBtn">Clear</button>
+            <button type="button" class="btn btn-primary" id="parsePasteBtn">Parse &amp; Preview Rows</button>
+          </div>
+        </div>
+      </div>
+
+      ${state.pendingUploadRows.length > 0 ? `
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Import Preview — ${state.pendingUploadFileName || 'Parsed Batch'} (${state.pendingUploadRows.length} rows)</h2></div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#334155;cursor:pointer;">
+                <input type="checkbox" id="skipDuplicatesChk" checked /> Skip duplicate phone numbers
+              </label>
+              <button class="btn btn-outline" id="cancelPreviewBtn">Discard</button>
+              <button class="btn btn-whatsapp" id="confirmImportLeadsBtn">✓ Import Valid Leads</button>
+            </div>
+          </div>
+          <div class="preview-summary-bar">
+            <div class="preview-badges">
+              <span class="status-badge badge-completed">✓ Valid: ${validRows.length}</span>
+              <span class="status-badge badge-meeting">⚠ Duplicates: ${dupRows.length}</span>
+              <span class="status-badge badge-lost">✕ Invalid: ${invalidRows.length}</span>
+            </div>
+            <span class="entity-sub">All imported leads are automatically added to Leads &amp; Status and Settlement Tracking.</span>
+          </div>
+          <div class="table-no-scroll table-compact">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Lead Name &amp; Phone</th>
+                  <th>Category • Specialty • City</th>
+                  <th>Status</th>
+                  <th>Deal / Paid</th>
+                  <th>Validation</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${state.pendingUploadRows.map(r => `
+                  <tr>
+                    <td class="td-primary">
+                      <strong>#${r.rowNum} ${r.name || '—'}</strong>
+                      <div class="entity-sub">${r.phone || 'Missing Phone'}</div>
+                    </td>
+                    <td><strong>${r.type.slice(0, -1)}</strong> • ${r.specialty} • ${r.city}</td>
+                    <td><span class="status-badge ${STATUS_BADGE_MAP[r.status] || 'badge-newlead'}">${r.status}</span></td>
+                    <td>
+                      <strong>${formatINR(r.dealValue)}</strong>
+                      <div class="entity-sub" style="color:#15803d;font-weight:600;">Paid: ${formatINR(r.paidAmount)}</div>
+                    </td>
+                    <td>
+                      ${!r.isValid
+                        ? `<span class="status-badge badge-lost">${r.errors.join(', ')}</span>`
+                        : r.isDuplicate
+                          ? `<span class="status-badge badge-meeting">Duplicate Phone</span>`
+                          : `<span class="status-badge badge-completed">Ready</span>`
+                      }
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title"><h2>Recent Leads Upload History (${state.uploadHistory.length})</h2></div>
+          <button class="btn btn-outline" id="uploadViewAllLeadsBtn">View All Leads →</button>
+        </div>
+        <div class="table-no-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Upload Date &amp; Time</th>
+                <th>Batch / File Name</th>
+                <th>Source</th>
+                <th>Leads Imported</th>
+                <th>Skipped</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.uploadHistory.map(u => `
+                <tr>
+                  <td>${u.date}</td>
+                  <td><strong>${u.fileName}</strong></td>
+                  <td><span class="status-badge badge-contacted">${u.source}</span></td>
+                  <td><strong style="color:#15803d;">+${u.imported} leads</strong></td>
+                  <td>${u.skipped}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    const fileInput = document.getElementById('leadsFileInput');
+    const dropzone = document.getElementById('leadsDropzone');
+
+    const finishParsedText = (text, fileName) => {
+      let csvText = text;
+      if (/<table[\s>]/i.test(text)) {
+        try {
+          const doc = new DOMParser().parseFromString(text, 'text/html');
+          const trs = Array.from(doc.querySelectorAll('table tr'));
+          csvText = trs.map(tr =>
+            Array.from(tr.querySelectorAll('th,td'))
+              .map(cell => `"${(cell.textContent || '').trim().replace(/"/g, '""')}"`)
+              .join(',')
+          ).join('\n');
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      const parsed = parseCSVText(csvText);
+      if (parsed.length === 0) {
+        showToast(`No lead rows found in "${fileName}". Check the file format or download the CSV template.`);
+        return;
+      }
+      state.pendingUploadRows = parsed;
+      state.pendingUploadFileName = fileName;
+      showToast(`Parsed ${parsed.length} rows from ${fileName}`);
+      renderLeadsUploadView();
+    };
+
+    const handleFile = (file) => {
+      if (!file) return;
+      const lowerName = (file.name || '').toLowerCase();
+      const isExcel = lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls');
+
+      if (isExcel && typeof window.XLSX !== 'undefined') {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const data = new Uint8Array(ev.target.result);
+            const workbook = window.XLSX.read(data, { type: 'array' });
+            const firstSheet = workbook.SheetNames[0];
+            const csv = window.XLSX.utils.sheet_to_csv(workbook.Sheets[firstSheet]);
+            finishParsedText(csv, file.name);
+          } catch (err) {
+            // Fallback for HTML-based .xls files
+            const textReader = new FileReader();
+            textReader.onload = (e2) => finishParsedText(String(e2.target.result || ''), file.name);
+            textReader.readAsText(file);
+          }
+        };
+        reader.onerror = () => showToast(`Failed to read ${file.name}`);
+        reader.readAsArrayBuffer(file);
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (ev) => finishParsedText(String(ev.target.result || ''), file.name);
+      reader.onerror = () => showToast(`Failed to read ${file.name}`);
+      reader.readAsText(file);
+    };
+
+    document.getElementById('browseCsvBtn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+    dropzone?.addEventListener('click', (e) => {
+      if (e.target.closest('button, label, a, input')) return;
+      if (fileInput) {
+        fileInput.value = '';
+        fileInput.click();
+      }
+    });
+    fileInput?.addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      if (f) handleFile(f);
+      e.target.value = '';
+    });
+
+    dropzone?.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('drag-over');
+    });
+    dropzone?.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+    dropzone?.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('drag-over');
+      handleFile(e.dataTransfer?.files?.[0]);
+    });
+
+    document.getElementById('downloadSampleCsvBtn')?.addEventListener('click', () => {
+      const sample = [
+        'Name,Category,Specialty,City,Phone,Status,Source,Assigned To,Deal Value,Paid Amount,Follow-up',
+        'Dr. Kavya Nair,Doctors,Ayurveda Kayachikitsa,Kochi,+91 98471 22334,New Lead,CSV Upload,Rahul Krishnan,30000,0,Tomorrow 10:30 AM',
+        'Arogya Wellness Clinic,Clinics,Panchakarma,Thrissur,+91 94462 77889,Interested,CSV Upload,Sneha Nair,60000,20000,Nov 28 2:00 PM',
+        'Sree Dhanwanthari Hospital,Hospitals,Multi-Specialty AYUSH,Trivandrum,+91 98952 44110,Onboarded,CSV Upload,Kiran Panicker,150000,150000,Completed'
+      ].join('\n');
+      const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'AyushDoc_Leads_Upload_Template.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast('Downloaded AyushDoc_Leads_Upload_Template.csv!');
+    });
+
+    document.getElementById('loadDemoBatchBtn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const demoCsv = [
+        'Name,Category,Specialty,City,Phone,Status,Source,Assigned To,Deal Value,Paid Amount,Follow-up',
+        'Dr. Kavya Nair,Doctors,Ayurveda Kayachikitsa,Kochi,+91 98471 22334,New Lead,CSV Upload,Rahul Krishnan,30000,0,Tomorrow 10:30 AM',
+        'Arogya Wellness Clinic,Clinics,Panchakarma,Thrissur,+91 94462 77889,Interested,CSV Upload,Sneha Nair,60000,20000,Nov 28 2:00 PM',
+        'Sree Dhanwanthari Hospital,Hospitals,Multi-Specialty AYUSH,Trivandrum,+91 98952 44110,Onboarded,CSV Upload,Kiran Panicker,150000,150000,Completed',
+        'Dr. Arvind Pillai,Doctors,Homeopathy,Kozhikode,+91 97455 33991,Meeting,CSV Upload,Arjun Menon,28000,14000,Nov 29 11:00 AM',
+        'Nila Siddha Center,Clinics,Siddha & Varma,Palakkad,+91 96338 55221,Contacted,CSV Upload,Neha Raj,45000,0,Nov 30 4:00 PM'
+      ].join('\n');
+      state.pendingUploadRows = parseCSVText(demoCsv);
+      state.pendingUploadFileName = 'demo_leads_batch_nov2026.csv';
+      showToast('Loaded 5 sample leads for preview!');
+      renderLeadsUploadView();
+    });
+
+    document.getElementById('parsePasteBtn')?.addEventListener('click', () => {
+      const text = document.getElementById('pasteCsvInput')?.value || '';
+      if (!text.trim()) {
+        showToast('Please paste CSV rows first.');
+        return;
+      }
+      state.pendingUploadRows = parseCSVText(text);
+      state.pendingUploadFileName = 'Pasted Bulk Leads';
+      showToast(`Parsed ${state.pendingUploadRows.length} pasted rows!`);
+      renderLeadsUploadView();
+    });
+
+    document.getElementById('clearPasteBtn')?.addEventListener('click', () => {
+      const box = document.getElementById('pasteCsvInput');
+      if (box) box.value = '';
+    });
+
+    document.getElementById('openSingleLeadFromUploadBtn')?.addEventListener('click', openAddPartnerModal);
+    document.getElementById('uploadViewAllLeadsBtn')?.addEventListener('click', () => switchView('leads'));
+
+    document.getElementById('cancelPreviewBtn')?.addEventListener('click', () => {
+      state.pendingUploadRows = [];
+      state.pendingUploadFileName = '';
+      renderLeadsUploadView();
+    });
+
+    document.getElementById('confirmImportLeadsBtn')?.addEventListener('click', () => {
+      const skipDup = document.getElementById('skipDuplicatesChk')?.checked ?? true;
+      let importedCount = 0;
+      let skippedCount = 0;
+
+      state.pendingUploadRows.forEach((r, idx) => {
+        if (!r.isValid || (skipDup && r.isDuplicate)) {
+          skippedCount++;
+          return;
+        }
+        const initials = r.name.replace(/^Dr\.\s*/i, '').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() || 'LD';
+        const newLead = normalizePartner({
+          id: Date.now() + idx,
+          initials,
+          color: r.type === 'Doctors' ? 'avatar-blue' : r.type === 'Clinics' ? 'avatar-green' : 'avatar-purple',
+          name: r.name,
+          type: r.type,
+          specialty: r.specialty,
+          city: r.city,
+          phone: r.phone,
+          status: r.status,
+          followup: r.followup,
+          leadSource: r.leadSource || 'CSV Upload',
+          assignedTo: r.assignedTo || 'Rahul Krishnan',
+          createdDate: todayISO(),
+          settlement: {
+            dealValue: r.dealValue,
+            commissionPct: 12,
+            paidAmount: r.paidAmount
+          }
+        }, idx);
+
+        state.partners.unshift(newLead);
+        state.counts.total++;
+        if (r.type === 'Doctors') state.counts.doctors++;
+        if (r.type === 'Clinics') state.counts.clinics++;
+        if (r.type === 'Hospitals') state.counts.hospitals++;
+        importedCount++;
+      });
+
+      if (importedCount === 0) {
+        showToast('No valid non-duplicate leads to import.');
+        return;
+      }
+
+      const nowStr = new Date().toLocaleString('en-IN', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      state.uploadHistory.unshift({
+        id: Date.now(),
+        date: nowStr,
+        fileName: state.pendingUploadFileName || 'Uploaded Batch',
+        source: state.pendingUploadFileName === 'Pasted Bulk Leads' ? 'Bulk Paste' : 'CSV Upload',
+        imported: importedCount,
+        skipped: skippedCount
+      });
+
+      state.pendingUploadRows = [];
+      state.pendingUploadFileName = '';
+      persistState();
+      syncDashboardCounts();
+      document.getElementById('kpiTotalPartners').textContent = state.counts.total.toLocaleString();
+      document.getElementById('kpiDoctors').textContent = state.counts.doctors.toLocaleString();
+      document.getElementById('kpiClinics').textContent = state.counts.clinics.toLocaleString();
+      document.getElementById('kpiHospitals').textContent = state.counts.hospitals.toLocaleString();
+      renderDashboardFollowups();
+
+      showToast(`Imported ${importedCount} leads successfully${skippedCount ? ` (${skippedCount} skipped)` : ''}!`);
+      renderLeadsUploadView();
+    });
+  }
+
+  // ---- FULL SETTLEMENT TRACKING VIEW ----
+  function renderSettlementsView() {
+    const allPartners = state.partners;
+    const totalDeal = allPartners.reduce((s, p) => s + (p.settlement?.dealValue || 0), 0);
+    const totalPaid = allPartners.reduce((s, p) => s + (p.settlement?.paidAmount || 0), 0);
+    const totalPending = allPartners.reduce((s, p) => s + (p.settlement?.pendingAmount || 0), 0);
+    const totalCommission = allPartners.reduce((s, p) => s + (p.settlement?.commissionAmount || 0), 0);
+    const settledCount = allPartners.filter(p => p.settlement?.settlementStatus === 'Settled').length;
+    const partialCount = allPartners.filter(p => p.settlement?.settlementStatus === 'Partial').length;
+    const unsettledCount = allPartners.filter(p => p.settlement?.settlementStatus === 'Unsettled').length;
+    const collectionRate = totalDeal > 0 ? ((totalPaid / totalDeal) * 100).toFixed(1) : '0.0';
+
+    const filtered = allPartners.filter(p => {
+      const matchSt = state.settlementFilter.status === 'All' || p.settlement.settlementStatus === state.settlementFilter.status;
+      const q = state.settlementFilter.search.trim().toLowerCase();
+      const matchQ = !q || matchesPartnerQuery(p, q) || (p.settlement.utrNumber || '').toLowerCase().includes(q) || (p.settlement.paymentMode || '').toLowerCase().includes(q);
+      return matchSt && matchQ;
+    });
+
+    const pager = paginateArray(filtered, state.pagination.settlementsPage, state.pagination.settlementsPageSize);
+    state.pagination.settlementsPage = pager.currentPage;
+
+    viewDynamic.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-blue">
+          <div class="kpi-details">
+            <div class="kpi-title">Total Deal Value</div>
+            <div class="kpi-value">${formatINR(totalDeal)}</div>
+            <div class="kpi-trend"><span class="trend-sub">Partner Commission: <strong>${formatINR(totalCommission)}</strong></span></div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-green">
+          <div class="kpi-details">
+            <div class="kpi-title">Total Settled / Collected</div>
+            <div class="kpi-value">${formatINR(totalPaid)}</div>
+            <div class="kpi-trend"><span class="trend-up">${collectionRate}%</span> <span class="trend-sub">collected</span></div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-orange">
+          <div class="kpi-details">
+            <div class="kpi-title">Pending Settlement</div>
+            <div class="kpi-value">${formatINR(totalPending)}</div>
+            <div class="kpi-trend"><span class="trend-sub">${partialCount} partial • ${unsettledCount} unsettled</span></div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-purple">
+          <div class="kpi-details">
+            <div class="kpi-title">Fully Settled Leads</div>
+            <div class="kpi-value">${settledCount} / ${allPartners.length}</div>
+            <div class="kpi-trend"><span class="trend-up">${allPartners.length ? Math.round((settledCount / allPartners.length) * 100) : 0}%</span> <span class="trend-sub">full settlement rate</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="filter-tabs" id="settlementStatusTabs">
+            <button class="filter-tab ${state.settlementFilter.status === 'All' ? 'active' : ''}" data-settle-st="All">All (${allPartners.length})</button>
+            <button class="filter-tab ${state.settlementFilter.status === 'Settled' ? 'active' : ''}" data-settle-st="Settled">Fully Settled (${settledCount})</button>
+            <button class="filter-tab ${state.settlementFilter.status === 'Partial' ? 'active' : ''}" data-settle-st="Partial">Partial (${partialCount})</button>
+            <button class="filter-tab ${state.settlementFilter.status === 'Unsettled' ? 'active' : ''}" data-settle-st="Unsettled">Unsettled (${unsettledCount})</button>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <input type="text" id="settlementSearchInput" value="${state.settlementFilter.search}" placeholder="Search lead, city, UTR, mode..." style="padding:7px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;min-width:210px;font-family:inherit;" />
+            <button class="btn btn-outline" id="exportSettlementCsvBtn">📥 Export Settlement CSV</button>
+          </div>
+        </div>
+        <div class="table-no-scroll table-compact">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Lead / Partner</th>
+                <th>Deal &amp; Comm.</th>
+                <th>Paid / Balance</th>
+                <th>Settlement Progress</th>
+                <th>UTR / Payment</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${pager.pageItems.length === 0 ? `
+                <tr><td colspan="6" style="text-align:center;padding:24px;color:#64748b;">No settlement records match the filter.</td></tr>
+              ` : pager.pageItems.map(p => {
+                const s = p.settlement;
+                const badgeCls = s.settlementStatus === 'Settled' ? 'badge-settled' : s.settlementStatus === 'Partial' ? 'badge-partial' : 'badge-unsettled';
+                const barColor = s.settlementStatus === 'Settled' ? '#16a34a' : s.settlementStatus === 'Partial' ? '#f59e0b' : '#ef4444';
+                return `
+                  <tr>
+                    <td data-label="Lead / Partner" class="td-primary">
+                      <div class="followup-entity">
+                        <div class="avatar-circle ${p.color}">${p.initials}</div>
+                        <div class="entity-info">
+                          <div class="entity-name">${p.name}</div>
+                          <div class="entity-sub">
+                            ${p.type.slice(0, -1)} • ${p.city}
+                            <span class="lead-mini-status ${p.badge}">${p.status}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td data-label="Deal & Comm.">
+                      <div style="font-weight:700;color:#0f2547;white-space:nowrap;">${formatINR(s.dealValue)}</div>
+                      <div class="entity-sub" style="white-space:nowrap;">Comm: ${formatINR(s.commissionAmount)} (${s.commissionPct}%)</div>
+                    </td>
+                    <td data-label="Paid / Balance">
+                      <div style="font-weight:700;color:#15803d;white-space:nowrap;">${formatINR(s.paidAmount)}</div>
+                      <div class="entity-sub" style="white-space:nowrap;color:${s.pendingAmount > 0 ? '#b91c1c' : '#64748b'};">Bal: ${formatINR(s.pendingAmount)}</div>
+                    </td>
+                    <td data-label="Settlement">
+                      <div class="settlement-progress-wrap">
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+                          <span class="status-badge ${badgeCls}" style="padding:2px 8px;font-size:11px;">${s.settlementStatus}</span>
+                          <span style="font-size:11.5px;font-weight:700;color:#334155;">${s.settledPct}%</span>
+                        </div>
+                        <div class="settlement-progress-track">
+                          <div class="settlement-progress-fill" style="width:${s.settledPct}%;background:${barColor};"></div>
+                        </div>
+                      </div>
+                    </td>
+                    <td data-label="UTR / Payment">
+                      <div style="font-size:12.2px;font-weight:700;color:#0f2547;">${s.utrNumber || '—'}</div>
+                      <div class="entity-sub">${s.paymentMode || 'Not paid'}${s.settledDate ? ' • ' + s.settledDate : ''}</div>
+                    </td>
+                    <td data-label="Actions" class="td-action">
+                      <div class="followup-actions" style="gap:6px;flex-wrap:wrap;">
+                        <button type="button" class="action-pill-btn pill-blue" data-manage-settle="${p.id}">Manage</button>
+                        ${s.pendingAmount > 0 ? `<button type="button" class="action-pill-btn pill-green" data-quick-full-settle="${p.id}">✓ Settle</button>` : ''}
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${renderPaginationBarHTML(pager, state.pagination.settlementsPageSize, 'settlements')}
+      </div>
+    `;
+
+    viewDynamic.querySelectorAll('#settlementStatusTabs [data-settle-st]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.settlementFilter.status = btn.getAttribute('data-settle-st');
+        state.pagination.settlementsPage = 1;
+        renderSettlementsView();
+      });
+    });
+
+    const settleSearch = document.getElementById('settlementSearchInput');
+    if (settleSearch) {
+      settleSearch.addEventListener('input', (e) => {
+        state.settlementFilter.search = e.target.value;
+        state.pagination.settlementsPage = 1;
+        renderSettlementsView();
+        const el = document.getElementById('settlementSearchInput');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    }
+
+    viewDynamic.querySelectorAll('[data-manage-settle]').forEach(btn => {
+      btn.addEventListener('click', () => openSettlementModal(Number(btn.getAttribute('data-manage-settle'))));
+    });
+
+    viewDynamic.querySelectorAll('[data-quick-full-settle]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pid = Number(btn.getAttribute('data-quick-full-settle'));
+        const partner = state.partners.find(x => x.id === pid);
+        if (!partner) return;
+        const rem = partner.settlement.pendingAmount;
+        if (rem <= 0) return;
+        const utr = `AYU${String(Date.now()).slice(-7)}`;
+        const dt = todayISO();
+        partner.settlement.transactions.unshift({
+          id: `TX-${Date.now()}`,
+          date: dt,
+          amount: rem,
+          mode: 'NEFT/RTGS',
+          utr,
+          note: 'Quick Full Settlement'
+        });
+        const newPaid = partner.settlement.dealValue;
+        const metrics = computeSettlementMetrics({
+          dealValue: partner.settlement.dealValue,
+          commissionPct: partner.settlement.commissionPct,
+          paidAmount: newPaid
+        });
+        partner.settlement = {
+          ...partner.settlement,
+          ...metrics,
+          paymentMode: 'NEFT/RTGS',
+          utrNumber: utr,
+          settledDate: dt
+        };
+        if (partner.status !== 'Onboarded') {
+          updateLeadStatus(partner.id, 'Onboarded', `Marked Onboarded after full settlement (${utr})`);
+        } else {
+          persistState();
+        }
+        showToast(`Full settlement of ${formatINR(rem)} recorded for ${partner.name} (UTR: ${utr})`);
+        renderSettlementsView();
+      });
+    });
+
+    document.getElementById('exportSettlementCsvBtn')?.addEventListener('click', () => {
+      exportLeadsCSV(filtered, `AyushDoc_Settlement_Report_${todayISO()}.csv`);
+    });
+
+    bindPaginationEvents(viewDynamic, 'settlements', 'settlementsPage', 'settlementsPageSize', renderSettlementsView);
+  }
+
+  // ---- ALL LEADS REPORTS GENERATION VIEW ----
+  function getFilteredReportLeads() {
+    const f = state.reportFilter;
+    return state.partners.filter(p => {
+      if (f.status !== 'All' && p.status !== f.status) return false;
+      if (f.category !== 'All' && p.type !== f.category) return false;
+      if (f.settlement !== 'All' && p.settlement.settlementStatus !== f.settlement) return false;
+      if (f.source !== 'All' && p.leadSource !== f.source) return false;
+      if (f.fromDate && p.createdDate < f.fromDate) return false;
+      if (f.toDate && p.createdDate > f.toDate) return false;
+      return true;
+    });
+  }
+
+  function exportLeadsCSV(leads, filename) {
+    const headers = [
+      'Lead Name', 'Category', 'Specialty', 'City', 'Phone', 'Lead Source', 'Assigned To',
+      'Created Date', 'Lead Status', 'Follow-up', 'Deal Value (INR)', 'Commission %',
+      'Commission (INR)', 'Paid Amount (INR)', 'Pending Balance (INR)', 'Settlement Status',
+      'Payment Mode', 'UTR / Reference', 'Settled Date'
+    ];
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = leads.map(p => [
+      p.name, p.type.slice(0, -1), p.specialty, p.city, p.phone, p.leadSource, p.assignedTo,
+      p.createdDate, p.status, p.followup, p.settlement.dealValue, p.settlement.commissionPct,
+      p.settlement.commissionAmount, p.settlement.paidAmount, p.settlement.pendingAmount,
+      p.settlement.settlementStatus, p.settlement.paymentMode, p.settlement.utrNumber, p.settlement.settledDate
+    ].map(esc).join(','));
+
+    const csv = [headers.map(esc).join(','), ...rows].join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${filename} (${leads.length} leads)!`);
+  }
+
+  function exportLeadsExcel(leads, filename) {
+    const totalDeal = leads.reduce((s, p) => s + p.settlement.dealValue, 0);
+    const totalPaid = leads.reduce((s, p) => s + p.settlement.paidAmount, 0);
+    const totalPending = leads.reduce((s, p) => s + p.settlement.pendingAmount, 0);
+    const html = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head><meta charset="UTF-8" /></head>
+      <body>
+        <h2>AyushDoc+ Partner CRM — All Leads &amp; Settlement Report</h2>
+        <p>Generated on: ${new Date().toLocaleString('en-IN')} | Total Leads: ${leads.length} | Total Deal: ${formatINR(totalDeal)} | Settled: ${formatINR(totalPaid)} | Pending: ${formatINR(totalPending)}</p>
+        <table border="1" cellspacing="0" cellpadding="6">
+          <thead style="background:#0f2547;color:#ffffff;font-weight:bold;">
+            <tr>
+              <th>Lead Name</th><th>Category</th><th>Specialty</th><th>City</th><th>Phone</th>
+              <th>Source</th><th>Assigned To</th><th>Date</th><th>Lead Status</th>
+              <th>Deal Value</th><th>Paid Amount</th><th>Pending</th><th>Settlement Status</th><th>UTR / Ref</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${leads.map(p => `
+              <tr>
+                <td>${p.name}</td><td>${p.type.slice(0, -1)}</td><td>${p.specialty}</td><td>${p.city}</td>
+                <td>${p.phone}</td><td>${p.leadSource}</td><td>${p.assignedTo}</td><td>${p.createdDate}</td>
+                <td>${p.status}</td><td>${p.settlement.dealValue}</td><td>${p.settlement.paidAmount}</td>
+                <td>${p.settlement.pendingAmount}</td><td>${p.settlement.settlementStatus}</td><td>${p.settlement.utrNumber || ''}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `;
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${filename} (${leads.length} leads)!`);
+  }
+
+  function printLeadsPDFReport(leads) {
+    const totalDeal = leads.reduce((s, p) => s + p.settlement.dealValue, 0);
+    const totalPaid = leads.reduce((s, p) => s + p.settlement.paidAmount, 0);
+    const totalPending = leads.reduce((s, p) => s + p.settlement.pendingAmount, 0);
+    const onboarded = leads.filter(p => p.status === 'Onboarded').length;
+    const win = window.open('', '_blank', 'width=1050,height=780');
+    if (!win) {
+      showToast('Please allow pop-ups to open the PDF print preview.');
+      return;
+    }
+    win.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>AyushDoc+ All Leads Report (${todayISO()})</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; color: #0f172a; padding: 24px; }
+          h1 { margin: 0 0 4px; color: #0f2547; font-size: 22px; }
+          .sub { color: #475569; font-size: 12.5px; margin-bottom: 18px; }
+          .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+          .kpi { border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; background: #f8fafc; }
+          .kpi .lbl { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 700; }
+          .kpi .val { font-size: 20px; font-weight: 800; color: #0f2547; margin-top: 4px; }
+          table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+          th { background: #0f2547; color: #ffffff; text-align: left; padding: 8px; }
+          td { border-bottom: 1px solid #e2e8f0; padding: 7px 8px; }
+          tr:nth-child(even) td { background: #f8fafc; }
+          @media print { .no-print { display: none; } }
+        </style>
+      </head>
+      <body>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <div>
+            <h1>AyushDoc+ Partner CRM — All Leads &amp; Settlement Report</h1>
+            <div class="sub">Generated: ${new Date().toLocaleString('en-IN')} | Records: ${leads.length}</div>
+          </div>
+          <button class="no-print" onclick="window.print()" style="padding:8px 16px;background:#0b57d0;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:700;">🖨️ Print / Save PDF</button>
+        </div>
+        <div class="kpi-row">
+          <div class="kpi"><div class="lbl">Total Leads</div><div class="val">${leads.length}</div></div>
+          <div class="kpi"><div class="lbl">Onboarded</div><div class="val">${onboarded}</div></div>
+          <div class="kpi"><div class="lbl">Total Settled</div><div class="val">${formatINR(totalPaid)}</div></div>
+          <div class="kpi"><div class="lbl">Pending Balance</div><div class="val">${formatINR(totalPending)}</div></div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Lead Name</th><th>Category</th><th>City</th><th>Phone</th><th>Source</th>
+              <th>Date</th><th>Status</th><th>Deal Value</th><th>Paid</th><th>Pending</th><th>Settlement</th><th>UTR</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${leads.map(p => `
+              <tr>
+                <td><strong>${p.name}</strong></td><td>${p.type.slice(0, -1)}</td><td>${p.city}</td>
+                <td>${p.phone}</td><td>${p.leadSource}</td><td>${p.createdDate}</td>
+                <td>${p.status}</td><td>${formatINR(p.settlement.dealValue)}</td>
+                <td>${formatINR(p.settlement.paidAmount)}</td><td>${formatINR(p.settlement.pendingAmount)}</td>
+                <td>${p.settlement.settlementStatus}</td><td>${p.settlement.utrNumber || '—'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 300);
+  }
+
+  function renderLeadsReportsView() {
+    const filtered = getFilteredReportLeads();
+    const sources = Array.from(new Set(state.partners.map(p => p.leadSource).filter(Boolean)));
+    const totalDeal = filtered.reduce((s, p) => s + p.settlement.dealValue, 0);
+    const totalPaid = filtered.reduce((s, p) => s + p.settlement.paidAmount, 0);
+    const totalPending = filtered.reduce((s, p) => s + p.settlement.pendingAmount, 0);
+    const onboardedCount = filtered.filter(p => p.status === 'Onboarded').length;
+    const convRate = filtered.length ? ((onboardedCount / filtered.length) * 100).toFixed(1) : '0.0';
+
+    const pager = paginateArray(filtered, state.pagination.reportsPage, state.pagination.reportsPageSize);
+    state.pagination.reportsPage = pager.currentPage;
+
+    const statusColors = {
+      'New Lead': '#2563eb',
+      'Contacted': '#0284c7',
+      'Interested': '#16a34a',
+      'Meeting': '#f59e0b',
+      'Onboarded': '#15803d',
+      'Lost': '#dc2626'
+    };
+
+    const settleBuckets = [
+      { key: 'Settled', label: 'Fully Settled', color: '#16a34a' },
+      { key: 'Partial', label: 'Partial Settlement', color: '#f59e0b' },
+      { key: 'Unsettled', label: 'Unsettled / Pending', color: '#ef4444' }
+    ];
+
+    viewDynamic.innerHTML = `
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title"><h2>Report Filters &amp; Export Controls</h2></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-outline" id="resetReportFiltersBtn">Reset Filters</button>
+            <button class="btn btn-outline" id="genCsvReportBtn">📥 Export CSV</button>
+            <button class="btn btn-whatsapp" id="genExcelReportBtn">📗 Export Excel (.xls)</button>
+            <button class="btn btn-primary" id="genPdfReportBtn">🖨️ Print / PDF Report</button>
+          </div>
+        </div>
+        <div class="report-filters-grid">
+          <div class="form-group">
+            <label>Lead Status</label>
+            <select id="repFilterStatus">
+              <option value="All" ${state.reportFilter.status === 'All' ? 'selected' : ''}>All Statuses</option>
+              ${LEAD_STATUSES.map(st => `<option value="${st}" ${state.reportFilter.status === st ? 'selected' : ''}>${st}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Partner Category</label>
+            <select id="repFilterCategory">
+              <option value="All" ${state.reportFilter.category === 'All' ? 'selected' : ''}>All Categories</option>
+              <option value="Doctors" ${state.reportFilter.category === 'Doctors' ? 'selected' : ''}>Doctors</option>
+              <option value="Clinics" ${state.reportFilter.category === 'Clinics' ? 'selected' : ''}>Clinics</option>
+              <option value="Hospitals" ${state.reportFilter.category === 'Hospitals' ? 'selected' : ''}>Hospitals</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Settlement Status</label>
+            <select id="repFilterSettlement">
+              <option value="All" ${state.reportFilter.settlement === 'All' ? 'selected' : ''}>All Settlement States</option>
+              <option value="Settled" ${state.reportFilter.settlement === 'Settled' ? 'selected' : ''}>Fully Settled</option>
+              <option value="Partial" ${state.reportFilter.settlement === 'Partial' ? 'selected' : ''}>Partial</option>
+              <option value="Unsettled" ${state.reportFilter.settlement === 'Unsettled' ? 'selected' : ''}>Unsettled</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Lead Source</label>
+            <select id="repFilterSource">
+              <option value="All" ${state.reportFilter.source === 'All' ? 'selected' : ''}>All Sources</option>
+              ${sources.map(src => `<option value="${src}" ${state.reportFilter.source === src ? 'selected' : ''}>${src}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>From Date</label>
+            <input type="date" id="repFilterFrom" value="${state.reportFilter.fromDate}" />
+          </div>
+          <div class="form-group">
+            <label>To Date</label>
+            <input type="date" id="repFilterTo" value="${state.reportFilter.toDate}" />
+          </div>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-blue">
+          <div class="kpi-details">
+            <div class="kpi-title">Matching Leads</div>
+            <div class="kpi-value">${filtered.length}</div>
+            <div class="kpi-trend"><span class="trend-up">${onboardedCount} Onboarded</span> <span class="trend-sub">(${convRate}% conv.)</span></div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-purple">
+          <div class="kpi-details">
+            <div class="kpi-title">Total Pipeline Deal Value</div>
+            <div class="kpi-value">${formatINR(totalDeal)}</div>
+            <div class="kpi-trend"><span class="trend-sub">Across filtered leads</span></div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-green">
+          <div class="kpi-details">
+            <div class="kpi-title">Settled Amount</div>
+            <div class="kpi-value">${formatINR(totalPaid)}</div>
+            <div class="kpi-trend"><span class="trend-up">${totalDeal ? Math.round((totalPaid / totalDeal) * 100) : 0}%</span> <span class="trend-sub">of deal value</span></div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-orange">
+          <div class="kpi-details">
+            <div class="kpi-title">Pending Settlement</div>
+            <div class="kpi-value">${formatINR(totalPending)}</div>
+            <div class="kpi-trend"><span class="trend-sub">Outstanding balance</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="middle-grid">
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Lead Status Distribution</h2></div>
+            <span class="status-badge badge-contacted">${filtered.length} leads</span>
+          </div>
+          <div class="funnel-list">
+            ${LEAD_STATUSES.map(st => {
+              const cnt = filtered.filter(p => p.status === st).length;
+              const pct = filtered.length ? Math.round((cnt / filtered.length) * 100) : 0;
+              return `
+                <div class="funnel-row">
+                  <div class="funnel-meta">
+                    <span>${st}</span>
+                    <span>${cnt} leads (${pct}%)</span>
+                  </div>
+                  <div class="funnel-track"><div class="funnel-fill" style="width:${pct}%;background:${statusColors[st]};"></div></div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Settlement Status Breakdown</h2></div>
+            <span class="status-badge badge-completed">${formatINR(totalPaid)} settled</span>
+          </div>
+          <div class="funnel-list">
+            ${settleBuckets.map(b => {
+              const items = filtered.filter(p => p.settlement.settlementStatus === b.key);
+              const amt = items.reduce((s, p) => s + (b.key === 'Unsettled' ? p.settlement.pendingAmount : p.settlement.paidAmount), 0);
+              const pct = filtered.length ? Math.round((items.length / filtered.length) * 100) : 0;
+              return `
+                <div class="funnel-row">
+                  <div class="funnel-meta">
+                    <span>${b.label} (${items.length} leads)</span>
+                    <span>${formatINR(amt)} (${pct}%)</span>
+                  </div>
+                  <div class="funnel-track"><div class="funnel-fill" style="width:${pct}%;background:${b.color};"></div></div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title"><h2>All Leads Detailed Report Preview (${filtered.length})</h2></div>
+        </div>
+        <div class="table-no-scroll table-compact">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Lead Name &amp; Phone</th>
+                <th>Category • City</th>
+                <th>Source • Owner</th>
+                <th>Lead Status</th>
+                <th>Deal / Paid / Bal</th>
+                <th>Settlement</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${pager.pageItems.length === 0 ? `
+                <tr><td colspan="6" style="text-align:center;padding:24px;color:#64748b;">No leads match the selected report filters.</td></tr>
+              ` : pager.pageItems.map(p => {
+                const s = p.settlement;
+                const sBadge = s.settlementStatus === 'Settled' ? 'badge-settled' : s.settlementStatus === 'Partial' ? 'badge-partial' : 'badge-unsettled';
+                return `
+                  <tr>
+                    <td class="td-primary">
+                      <strong>${p.name}</strong>
+                      <div class="entity-sub">${p.phone}</div>
+                    </td>
+                    <td>
+                      <div>${p.type.slice(0, -1)} • ${p.city}</div>
+                      <div class="entity-sub">${p.createdDate}</div>
+                    </td>
+                    <td>
+                      <div>${p.leadSource}</div>
+                      <div class="entity-sub">${p.assignedTo}</div>
+                    </td>
+                    <td><span class="status-badge ${p.badge}">${p.status}</span></td>
+                    <td>
+                      <div style="font-weight:700;color:#0f2547;white-space:nowrap;">${formatINR(s.dealValue)}</div>
+                      <div class="entity-sub" style="white-space:nowrap;"><span style="color:#15803d;font-weight:600;">Paid ${formatINR(s.paidAmount)}</span> • Bal ${formatINR(s.pendingAmount)}</div>
+                    </td>
+                    <td>
+                      <span class="status-badge ${sBadge}">${s.settlementStatus}</span>
+                      ${s.utrNumber ? `<div class="entity-sub">${s.utrNumber}</div>` : ''}
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${renderPaginationBarHTML(pager, state.pagination.reportsPageSize, 'reports')}
+      </div>
+    `;
+
+    const bindFilter = (id, key) => {
+      document.getElementById(id)?.addEventListener('change', (e) => {
+        state.reportFilter[key] = e.target.value;
+        state.pagination.reportsPage = 1;
+        renderLeadsReportsView();
+      });
+    };
+    bindFilter('repFilterStatus', 'status');
+    bindFilter('repFilterCategory', 'category');
+    bindFilter('repFilterSettlement', 'settlement');
+    bindFilter('repFilterSource', 'source');
+    bindFilter('repFilterFrom', 'fromDate');
+    bindFilter('repFilterTo', 'toDate');
+
+    document.getElementById('resetReportFiltersBtn')?.addEventListener('click', () => {
+      state.reportFilter = { status: 'All', category: 'All', settlement: 'All', source: 'All', fromDate: '', toDate: '' };
+      state.pagination.reportsPage = 1;
+      renderLeadsReportsView();
+    });
+
+    document.getElementById('genCsvReportBtn')?.addEventListener('click', () => {
+      exportLeadsCSV(filtered, `AyushDoc_All_Leads_Report_${todayISO()}.csv`);
+    });
+
+    document.getElementById('genExcelReportBtn')?.addEventListener('click', () => {
+      exportLeadsExcel(filtered, `AyushDoc_All_Leads_Report_${todayISO()}.xls`);
+    });
+
+    document.getElementById('genPdfReportBtn')?.addEventListener('click', () => {
+      printLeadsPDFReport(filtered);
+    });
+
+    bindPaginationEvents(viewDynamic, 'reports', 'reportsPage', 'reportsPageSize', renderLeadsReportsView);
+  }
+
+  // ---- SETTLEMENT MANAGEMENT MODAL ----
+  function openSettlementModal(partnerId, opts = {}) {
+    const partner = state.partners.find(p => p.id === partnerId);
+    if (!partner) return;
+    const s = partner.settlement;
+    const returnToLead = Boolean(opts.returnToLead);
+
+    modalContent.classList.add('modal-wide');
+    modalContent.innerHTML = `
+      <div class="modal-header">
+        <h3>💳 Settlement Tracking — ${partner.name}</h3>
+        <button type="button" class="modal-close" id="closeModalBtn">✕</button>
+      </div>
+      <div class="settlement-kpi-strip">
+        <div class="settlement-mini-box">
+          <div class="mini-lbl">Deal Value</div>
+          <div class="mini-val" id="settleModalDealDisp">${formatINR(s.dealValue)}</div>
+          <div class="entity-sub" id="settleModalCommDisp">Comm (${s.commissionPct}%): ${formatINR(s.commissionAmount)}</div>
+        </div>
+        <div class="settlement-mini-box">
+          <div class="mini-lbl">Total Paid</div>
+          <div class="mini-val" style="color:#15803d;" id="settleModalPaidDisp">${formatINR(s.paidAmount)}</div>
+          <div class="entity-sub" id="settleModalPctDisp">${s.settledPct}% settled</div>
+        </div>
+        <div class="settlement-mini-box">
+          <div class="mini-lbl">Pending Balance</div>
+          <div class="mini-val" style="color:${s.pendingAmount > 0 ? '#b91c1c' : '#15803d'};" id="settleModalPendDisp">${formatINR(s.pendingAmount)}</div>
+          <div class="entity-sub" id="settleModalStatusDisp">${s.settlementStatus}</div>
+        </div>
+      </div>
+
+      <form id="settlementForm">
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>Total Deal Value (₹) *</label>
+            <input type="number" name="dealValue" id="settleDealInput" min="0" value="${s.dealValue}" required />
+          </div>
+          <div class="form-group">
+            <label>Partner Commission (%)</label>
+            <input type="number" name="commissionPct" id="settleCommInput" min="0" max="100" value="${s.commissionPct}" />
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>Record New Payment Amount (₹)</label>
+            <div style="display:flex;gap:6px;">
+              <input type="number" name="payAmount" id="settlePayInput" min="0" placeholder="0" value="${s.pendingAmount > 0 ? s.pendingAmount : 0}" style="flex:1;" />
+              <button type="button" class="action-pill-btn pill-green" id="fillFullBalBtn">Full Bal</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Payment Mode</label>
+            <select name="paymentMode">
+              ${['NEFT/RTGS', 'UPI', 'IMPS', 'Bank Transfer', 'Cheque', 'Cash'].map(m => `<option value="${m}" ${s.paymentMode === m ? 'selected' : ''}>${m}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>UTR / Transaction Reference</label>
+            <input type="text" name="utrNumber" value="${s.utrNumber || ''}" placeholder="e.g. AYU26119981" />
+          </div>
+          <div class="form-group">
+            <label>Payment / Settlement Date</label>
+            <input type="date" name="settledDate" value="${todayISO()}" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Settlement Remarks / Notes</label>
+          <input type="text" name="notes" value="${s.notes || ''}" placeholder="e.g. Final tranche cleared via HDFC NEFT" />
+        </div>
+
+        <div style="margin-top:8px;">
+          <div style="font-size:12.5px;font-weight:700;color:#334155;">Payment Ledger (${s.transactions.length} transactions)</div>
+          <div class="ledger-list">
+            ${s.transactions.length === 0
+              ? `<div class="entity-sub" style="padding:8px 0;">No settlement payments recorded yet.</div>`
+              : s.transactions.map((tx, idx) => `
+                  <div class="ledger-item">
+                    <div>
+                      <strong>${formatINR(tx.amount)}</strong> via <strong>${tx.mode}</strong>
+                      <div class="entity-sub">${tx.date} • UTR: ${tx.utr || 'N/A'}${tx.note ? ' • ' + tx.note : ''}</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <span class="status-badge badge-completed">Paid</span>
+                      <button type="button" class="action-pill-btn" data-undo-tx="${idx}" title="Remove this payment entry" style="padding:3px 7px;font-size:11px;color:#b91c1c;border-color:#fecaca;">Undo</button>
+                    </div>
+                  </div>
+                `).join('')
+            }
+          </div>
+        </div>
+
+        <div class="modal-actions modal-actions-split">
+          <div>
+            ${returnToLead ? `<button type="button" class="btn btn-outline" id="backToLeadProfileBtn">← Back to Lead Profile</button>` : ''}
+          </div>
+          <div class="modal-actions-right">
+            <button type="button" class="btn btn-outline" id="cancelModalBtn">Close</button>
+            <button type="submit" class="btn btn-whatsapp">💾 Save &amp; Record Settlement</button>
+          </div>
+        </div>
+      </form>
+    `;
+
+    modalBackdrop.style.display = 'flex';
+    const closeAndReset = () => { modalContent.classList.remove('modal-wide'); closeModal(); };
+    document.getElementById('closeModalBtn').onclick = closeAndReset;
+    document.getElementById('cancelModalBtn').onclick = closeAndReset;
+
+    document.getElementById('backToLeadProfileBtn')?.addEventListener('click', () => {
+      openLeadDetailModal(partner.id);
+    });
+
+    const updateLivePreview = () => {
+      const deal = Math.max(0, Number(document.getElementById('settleDealInput')?.value) || 0);
+      const commPct = Math.max(0, Math.min(100, Number(document.getElementById('settleCommInput')?.value) || 0));
+      const addPay = Math.max(0, Number(document.getElementById('settlePayInput')?.value) || 0);
+      const previewPaid = Math.min(deal, s.paidAmount + addPay);
+      const previewMetrics = computeSettlementMetrics({ dealValue: deal, commissionPct: commPct, paidAmount: previewPaid });
+
+      const dealEl = document.getElementById('settleModalDealDisp');
+      const commEl = document.getElementById('settleModalCommDisp');
+      const paidEl = document.getElementById('settleModalPaidDisp');
+      const pctEl = document.getElementById('settleModalPctDisp');
+      const pendEl = document.getElementById('settleModalPendDisp');
+      const stEl = document.getElementById('settleModalStatusDisp');
+
+      if (dealEl) dealEl.textContent = formatINR(previewMetrics.dealValue);
+      if (commEl) commEl.textContent = `Comm (${previewMetrics.commissionPct}%): ${formatINR(previewMetrics.commissionAmount)}`;
+      if (paidEl) paidEl.textContent = formatINR(previewMetrics.paidAmount);
+      if (pctEl) pctEl.textContent = `${previewMetrics.settledPct}% settled${addPay > 0 ? ' (after save)' : ''}`;
+      if (pendEl) {
+        pendEl.textContent = formatINR(previewMetrics.pendingAmount);
+        pendEl.style.color = previewMetrics.pendingAmount > 0 ? '#b91c1c' : '#15803d';
+      }
+      if (stEl) stEl.textContent = previewMetrics.settlementStatus;
+    };
+
+    document.getElementById('settleDealInput')?.addEventListener('input', updateLivePreview);
+    document.getElementById('settleCommInput')?.addEventListener('input', updateLivePreview);
+    document.getElementById('settlePayInput')?.addEventListener('input', updateLivePreview);
+    updateLivePreview();
+
+    document.getElementById('fillFullBalBtn')?.addEventListener('click', () => {
+      const deal = Math.max(0, Number(document.getElementById('settleDealInput')?.value) || 0);
+      const rem = Math.max(0, deal - s.paidAmount);
+      const payEl = document.getElementById('settlePayInput');
+      if (payEl) payEl.value = rem;
+      updateLivePreview();
+      showToast(rem > 0 ? `Filled remaining balance: ${formatINR(rem)}` : 'This lead is already fully settled!');
+    });
+
+    modalContent.querySelectorAll('[data-undo-tx]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.getAttribute('data-undo-tx'));
+        const removed = partner.settlement.transactions.splice(idx, 1)[0];
+        const recalcPaid = partner.settlement.transactions.reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+        const metrics = computeSettlementMetrics({
+          dealValue: partner.settlement.dealValue,
+          commissionPct: partner.settlement.commissionPct,
+          paidAmount: recalcPaid
+        });
+        partner.settlement = {
+          ...partner.settlement,
+          ...metrics,
+          paymentMode: partner.settlement.transactions[0]?.mode || '',
+          utrNumber: partner.settlement.transactions[0]?.utr || '',
+          settledDate: metrics.settlementStatus === 'Settled' ? (partner.settlement.transactions[0]?.date || '') : ''
+        };
+        persistState();
+        refreshCurrentView();
+        showToast(`Removed payment of ${formatINR(removed?.amount || 0)} from ledger`);
+        openSettlementModal(partner.id, { returnToLead });
+      });
+    });
+
+    document.getElementById('settlementForm').onsubmit = (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const newDeal = Math.max(0, Number(fd.get('dealValue')) || 0);
+      const newComm = Math.max(0, Math.min(100, Number(fd.get('commissionPct')) || 0));
+      const addPay = Math.max(0, Number(fd.get('payAmount')) || 0);
+      const mode = fd.get('paymentMode').toString();
+      const utr = fd.get('utrNumber').toString().trim() || `AYU${String(Date.now()).slice(-7)}`;
+      const dt = fd.get('settledDate').toString() || todayISO();
+      const notes = fd.get('notes').toString().trim();
+
+      let totalPaid = s.paidAmount;
+      const remainingBefore = Math.max(0, newDeal - totalPaid);
+      if (addPay > 0 && remainingBefore === 0) {
+        showToast('Already fully settled! Increase Deal Value if adding more.');
+        return;
+      }
+
+      if (addPay > 0) {
+        const appliedPay = Math.min(addPay, remainingBefore);
+        if (appliedPay > 0) {
+          totalPaid += appliedPay;
+          partner.settlement.transactions.unshift({
+            id: `TX-${Date.now()}`,
+            date: dt,
+            amount: appliedPay,
+            mode,
+            utr,
+            note: notes || (totalPaid >= newDeal ? 'Full settlement completed' : 'Partial settlement payment')
+          });
+        }
+      }
+
+      const metrics = computeSettlementMetrics({
+        dealValue: newDeal,
+        commissionPct: newComm,
+        paidAmount: totalPaid
+      });
+
+      partner.settlement = {
+        ...partner.settlement,
+        ...metrics,
+        paymentMode: addPay > 0 ? mode : partner.settlement.paymentMode,
+        utrNumber: addPay > 0 ? utr : partner.settlement.utrNumber,
+        settledDate: metrics.settlementStatus === 'Settled' ? dt : partner.settlement.settledDate,
+        notes
+      };
+
+      if (metrics.settlementStatus === 'Settled' && partner.status !== 'Onboarded') {
+        updateLeadStatus(partner.id, 'Onboarded', `Full settlement completed (${utr})`);
+      } else {
+        persistState();
+      }
+
+      refreshCurrentView();
+      window.AyushUserManagement?.logCrmEvent(
+        'SETTLEMENT_UPDATED',
+        'settlements',
+        partner.id,
+        `Updated settlement for ${partner.name}: paid=${formatINR(partner.settlement.paidAmount)} (${partner.settlement.settlementStatus})`
+      );
+      showToast(`Settlement saved for ${partner.name} (${partner.settlement.settlementStatus})!`);
+      if (returnToLead) {
+        openLeadDetailModal(partner.id);
+      } else {
+        closeAndReset();
+      }
+    };
+  }
+
+  // ---- SCROLL-WHEEL DATE & TIME PICKER HELPER ----
+  function buildDateWheelOptions(currentVal = '') {
+    const opts = ['Today', 'Tomorrow'];
+    const base = new Date();
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    for (let i = 2; i <= 15; i++) {
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      opts.push(`${months[d.getMonth()]} ${d.getDate()}`);
+    }
+    const existingDay = String(currentVal || '').split(',')[0].trim();
+    if (existingDay && existingDay !== 'Completed' && !opts.includes(existingDay)) {
+      opts.unshift(existingDay);
+    }
+    return opts;
+  }
+
+  function parseFollowupString(val) {
+    const str = String(val || '').trim();
+    const m = str.match(/^([^,]+),\s*(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (m) {
+      const day = m[1].trim();
+      const hour = String(Math.min(12, Math.max(1, Number(m[2])))).padStart(2, '0');
+      const rawMin = Math.round((Number(m[3]) || 0) / 5) * 5;
+      const minute = String(rawMin >= 60 ? 55 : rawMin).padStart(2, '0');
+      const ampm = m[4].toUpperCase();
+      return { day, hour, minute, ampm };
+    }
+    return { day: 'Today', hour: '03', minute: '00', ampm: 'PM' };
+  }
+
+  function renderScrollTimePickerHTML(prefix, fieldName, initialValue) {
+    const safeVal = initialValue || 'Today, 3:00 PM';
+    const dayOpts = buildDateWheelOptions(safeVal);
+    const hourOpts = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
+    const minOpts = Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, '0'));
+    const ampmOpts = ['AM', 'PM'];
+
+    return `
+      <div class="scroll-picker-wrap" id="${prefix}Wrap">
+        <input type="hidden" name="${fieldName}" id="${prefix}HiddenInput" value="${safeVal}" />
+        <button type="button" class="scroll-picker-trigger" id="${prefix}Trigger">
+          <span id="${prefix}TriggerText">📅 ${safeVal}</span>
+          <span style="font-size:11.5px;color:#0b57d0;font-weight:700;">🕒 Scroll Time ▾</span>
+        </button>
+        <div class="scroll-picker-popover" id="${prefix}Popover">
+          <div class="wheel-header-row">
+            <span>Day / Date</span>
+            <span>Hour</span>
+            <span>Min</span>
+            <span>AM/PM</span>
+          </div>
+          <div class="wheel-stage">
+            <div class="wheel-highlight-band"></div>
+            <div class="wheel-col" id="${prefix}DayCol">
+              ${dayOpts.map(d => `<div class="wheel-item" data-val="${d}">${d}</div>`).join('')}
+            </div>
+            <div class="wheel-col" id="${prefix}HourCol">
+              ${hourOpts.map(h => `<div class="wheel-item" data-val="${h}">${h}</div>`).join('')}
+            </div>
+            <div class="wheel-col" id="${prefix}MinCol">
+              ${minOpts.map(m => `<div class="wheel-item" data-val="${m}">${m}</div>`).join('')}
+            </div>
+            <div class="wheel-col" id="${prefix}AmpmCol">
+              ${ampmOpts.map(a => `<div class="wheel-item" data-val="${a}">${a}</div>`).join('')}
+            </div>
+          </div>
+          <div class="wheel-footer">
+            <span class="wheel-preview-text" id="${prefix}Preview">Selected: ${safeVal}</span>
+            <button type="button" class="action-pill-btn pill-blue" id="${prefix}DoneBtn">✓ Set Time</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function initScrollTimePicker(prefix, initialValue) {
+    const trigger = document.getElementById(`${prefix}Trigger`);
+    const triggerText = document.getElementById(`${prefix}TriggerText`);
+    const popover = document.getElementById(`${prefix}Popover`);
+    const hiddenInput = document.getElementById(`${prefix}HiddenInput`);
+    const previewEl = document.getElementById(`${prefix}Preview`);
+    const doneBtn = document.getElementById(`${prefix}DoneBtn`);
+
+    const cols = {
+      day: document.getElementById(`${prefix}DayCol`),
+      hour: document.getElementById(`${prefix}HourCol`),
+      minute: document.getElementById(`${prefix}MinCol`),
+      ampm: document.getElementById(`${prefix}AmpmCol`)
+    };
+    if (!trigger || !popover || !cols.day) return;
+
+    const ITEM_H = 36;
+    const selected = parseFollowupString(initialValue);
+
+    const syncOutput = () => {
+      const displayHour = String(Number(selected.hour));
+      const formatted = `${selected.day}, ${displayHour}:${selected.minute} ${selected.ampm}`;
+      if (hiddenInput) hiddenInput.value = formatted;
+      if (triggerText) triggerText.textContent = `📅 ${formatted}`;
+      if (previewEl) previewEl.textContent = `Selected: ${formatted}`;
+    };
+
+    const setColToValue = (colEl, key, val, instant = false) => {
+      const items = Array.from(colEl.querySelectorAll('.wheel-item'));
+      let idx = items.findIndex(el => el.getAttribute('data-val') === val);
+      if (idx < 0) idx = 0;
+      items.forEach((el, i) => el.classList.toggle('selected', i === idx));
+      selected[key] = items[idx]?.getAttribute('data-val') || val;
+      if (instant) {
+        const prevBehavior = colEl.style.scrollBehavior;
+        colEl.style.scrollBehavior = 'auto';
+        colEl.scrollTop = idx * ITEM_H;
+        colEl.style.scrollBehavior = prevBehavior;
+      } else {
+        colEl.scrollTo({ top: idx * ITEM_H, behavior: 'smooth' });
+      }
+    };
+
+    Object.entries(cols).forEach(([key, colEl]) => {
+      let scrollTimer;
+      colEl.addEventListener('scroll', () => {
+        clearTimeout(scrollTimer);
+        scrollTimer = setTimeout(() => {
+          const items = Array.from(colEl.querySelectorAll('.wheel-item'));
+          const idx = Math.min(items.length - 1, Math.max(0, Math.round(colEl.scrollTop / ITEM_H)));
+          items.forEach((el, i) => el.classList.toggle('selected', i === idx));
+          const val = items[idx]?.getAttribute('data-val');
+          if (val) {
+            selected[key] = val;
+            syncOutput();
+          }
+        }, 60);
+      });
+
+      colEl.querySelectorAll('.wheel-item').forEach((itemEl) => {
+        itemEl.addEventListener('click', () => {
+          const val = itemEl.getAttribute('data-val');
+          setColToValue(colEl, key, val, false);
+          syncOutput();
+        });
+      });
+    });
+
+    const alignAllInstant = () => {
+      setColToValue(cols.day, 'day', selected.day, true);
+      setColToValue(cols.hour, 'hour', selected.hour, true);
+      setColToValue(cols.minute, 'minute', selected.minute, true);
+      setColToValue(cols.ampm, 'ampm', selected.ampm, true);
+    };
+
+    trigger.addEventListener('click', () => {
+      const isOpen = popover.classList.toggle('open');
+      trigger.classList.toggle('open', isOpen);
+      if (isOpen) {
+        requestAnimationFrame(alignAllInstant);
+      }
+    });
+
+    doneBtn?.addEventListener('click', () => {
+      syncOutput();
+      popover.classList.remove('open');
+      trigger.classList.remove('open');
+    });
+  }
+
+  // ---- LEAD DETAILS & STATUS TIMELINE MODAL ----
+  function openLeadDetailModal(partnerId) {
+    const partner = state.partners.find(p => p.id === partnerId);
+    if (!partner) return;
+    const s = partner.settlement;
+
+    modalContent.classList.add('modal-wide');
+    modalContent.innerHTML = `
+      <div class="modal-header">
+        <h3>📋 Lead Profile &amp; Status History — ${partner.name}</h3>
+        <button type="button" class="modal-close" id="closeModalBtn">✕</button>
+      </div>
+      <form id="leadDetailForm">
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>Lead Status</label>
+            <select name="status" id="leadDetailStatusSel">
+              ${LEAD_STATUSES.map(st => `<option value="${st}" ${partner.status === st ? 'selected' : ''}>${st}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Assigned Executive</label>
+            <input type="text" name="assignedTo" value="${partner.assignedTo}" placeholder="Enter executive name" autocomplete="off" />
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>Lead Source</label>
+            <input type="text" name="leadSource" value="${partner.leadSource}" placeholder="Enter lead source" autocomplete="off" />
+          </div>
+          <div class="form-group">
+            <label>Next Follow-up</label>
+            ${renderScrollTimePickerHTML('leadFuPicker', 'followup', partner.followup)}
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Status Update Note (Optional)</label>
+          <input type="text" name="statusNote" placeholder="e.g. Doctor confirmed onboarding fee transfer" />
+        </div>
+
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:10px 0;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:#64748b;">SETTLEMENT SUMMARY</div>
+            <div style="font-size:14px;font-weight:800;color:#0f2547;margin-top:2px;">
+              Paid ${formatINR(s.paidAmount)} / ${formatINR(s.dealValue)}
+              <span class="entity-sub">(${s.settlementStatus} • Bal ${formatINR(s.pendingAmount)})</span>
+            </div>
+          </div>
+          <button type="button" class="action-pill-btn pill-green" id="jumpToSettleFromLeadBtn">💳 Manage Settlement</button>
+        </div>
+
+        <div style="margin-top:10px;">
+          <div style="font-size:12.5px;font-weight:700;color:#334155;">Status Change Timeline (${partner.statusHistory.length})</div>
+          <div class="timeline-list">
+            ${partner.statusHistory.map(h => `
+              <div class="timeline-item">
+                <div style="font-size:13px;font-weight:700;color:#0f2547;">${h.status} <span class="entity-sub">• ${h.date}</span></div>
+                <div class="entity-sub">${h.note || ''}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-outline" id="cancelModalBtn">Close</button>
+          <button type="submit" class="btn btn-primary">Save Lead Changes</button>
+        </div>
+      </form>
+    `;
+
+    modalBackdrop.style.display = 'flex';
+    initScrollTimePicker('leadFuPicker', partner.followup);
+    const closeAndReset = () => { modalContent.classList.remove('modal-wide'); closeModal(); };
+    document.getElementById('closeModalBtn').onclick = closeAndReset;
+    document.getElementById('cancelModalBtn').onclick = closeAndReset;
+
+    const saveLeadFormValues = () => {
+      const formEl = document.getElementById('leadDetailForm');
+      if (!formEl) return false;
+      const fd = new FormData(formEl);
+      const newStatus = fd.get('status').toString();
+      const note = fd.get('statusNote').toString().trim();
+      const newAssigned = fd.get('assignedTo').toString().trim() || partner.assignedTo;
+      const newSource = fd.get('leadSource').toString().trim() || partner.leadSource;
+      const newFollowup = fd.get('followup').toString().trim() || partner.followup;
+
+      const changed = (
+        newStatus !== partner.status ||
+        Boolean(note) ||
+        newAssigned !== partner.assignedTo ||
+        newSource !== partner.leadSource ||
+        newFollowup !== partner.followup
+      );
+
+      partner.assignedTo = newAssigned;
+      partner.leadSource = newSource;
+      partner.followup = newFollowup;
+
+      if (newStatus !== partner.status || note) {
+        updateLeadStatus(partner.id, newStatus, note || `Status updated to ${newStatus}`, true);
+      } else if (changed) {
+        persistState();
+      }
+      if (changed) {
+        refreshCurrentView();
+        window.AyushUserManagement?.logCrmEvent(
+          'LEAD_ASSIGNED',
+          'leads',
+          partner.id,
+          `Updated lead ${partner.name}: status=${partner.status}, assignedTo=${partner.assignedTo}`
+        );
+      }
+      return changed;
+    };
+
+    document.getElementById('jumpToSettleFromLeadBtn')?.addEventListener('click', () => {
+      saveLeadFormValues();
+      openSettlementModal(partner.id, { returnToLead: true });
+    });
+
+    document.getElementById('leadDetailForm').onsubmit = (e) => {
+      e.preventDefault();
+      saveLeadFormValues();
+      closeAndReset();
+      showToast(`Saved updates for ${partner.name}`);
+    };
   }
 
   // ---- PAGINATED FOLLOW-UPS VIEW ----
@@ -717,16 +2645,15 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
           <button class="btn btn-outline" id="goToReportsBtn">📊 View Analytics Reports →</button>
         </div>
-        <div class="table-no-scroll">
+        <div class="table-no-scroll table-compact">
           <table class="data-table">
             <thead>
               <tr>
-                <th>Campaign Name</th>
-                <th>Target Audience</th>
+                <th>Campaign &amp; Audience</th>
                 <th>WABA Template</th>
                 <th>Launch Date</th>
                 <th>Recipients</th>
-                <th>Broadcast Status</th>
+                <th>Status</th>
                 <th>Quick Action</th>
               </tr>
             </thead>
@@ -739,15 +2666,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     : 'ayush_hospital_collab_v3';
                 return `
                   <tr>
-                    <td data-label="Campaign Name" class="td-primary"><strong>${c.title}</strong></td>
-                    <td data-label="Target Audience"><strong>${c.segment}</strong></td>
+                    <td data-label="Campaign & Audience" class="td-primary">
+                      <strong>${c.title}</strong>
+                      <div class="entity-sub">Target: <strong>${c.segment}</strong></div>
+                    </td>
                     <td data-label="WABA Template"><span class="template-code">${tplCode}</span></td>
-                    <td data-label="Launch Date">${c.date}</td>
-                    <td data-label="Recipients"><strong>${c.sent.toLocaleString()}</strong> partners</td>
-                    <td data-label="Broadcast Status"><span class="status-badge badge-completed">${c.status}</span></td>
+                    <td data-label="Launch Date" style="white-space:nowrap;">${c.date}</td>
+                    <td data-label="Recipients" style="white-space:nowrap;"><strong>${c.sent.toLocaleString()}</strong> partners</td>
+                    <td data-label="Status"><span class="status-badge badge-completed">${c.status}</span></td>
                     <td data-label="Quick Action" class="td-action">
                       <div class="followup-actions">
-                        <button class="wa-action-btn clone-campaign-btn" data-title="${c.title}" data-seg="${c.segment}">
+                        <button type="button" class="wa-action-btn clone-campaign-btn" data-title="${c.title}" data-seg="${c.segment}">
                           ${waSvgIcon}
                           <span>Send Again</span>
                         </button>
@@ -1005,6 +2934,7 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="panel-card">
         <div class="panel-header">
           <div class="panel-title"><h2>CRM Team Members &amp; Roles (${state.team.length})</h2></div>
+          <button type="button" class="btn btn-primary" id="teamOpenUserMgmtBtn">Manage Users, Roles &amp; Teams →</button>
         </div>
         <div class="table-no-scroll">
           <table class="data-table">
@@ -1039,6 +2969,10 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
 
+    document.getElementById('teamOpenUserMgmtBtn')?.addEventListener('click', () => {
+      window.AyushUserManagement?.setActiveTab('org');
+      switchView('user-management');
+    });
     bindPaginationEvents(viewDynamic, 'team', 'teamPage', 'teamPageSize', renderTeamView);
   }
 
@@ -1082,6 +3016,8 @@ document.addEventListener('DOMContentLoaded', () => {
       state.pagination.followupsPage = 1;
       state.pagination.campaignsPage = 1;
       state.pagination.teamPage = 1;
+      state.pagination.settlementsPage = 1;
+      state.pagination.reportsPage = 1;
     }
     state.currentView = viewKey;
     setActiveSidebarItem(viewKey);
@@ -1093,21 +3029,32 @@ document.addEventListener('DOMContentLoaded', () => {
     if (viewKey === 'dashboard') {
       viewDashboard.style.display = 'flex';
       viewDynamic.style.display = 'none';
+      syncDashboardCounts();
       return;
     }
 
     viewDashboard.style.display = 'none';
     viewDynamic.style.display = 'flex';
 
+    if (window.AyushUserManagement && !window.AyushUserManagement.checkViewAccess(viewKey, viewDynamic)) {
+      return;
+    }
+
     if (viewKey === 'partners-all') renderPartnersView('All', searchQuery);
     else if (viewKey === 'doctors') renderPartnersView('Doctors', searchQuery);
     else if (viewKey === 'clinics') renderPartnersView('Clinics', searchQuery);
     else if (viewKey === 'hospitals') renderPartnersView('Hospitals', searchQuery);
     else if (viewKey === 'leads') renderLeadsView();
+    else if (viewKey === 'leads-upload') renderLeadsUploadView();
+    else if (viewKey === 'settlements') renderSettlementsView();
+    else if (viewKey === 'leads-reports') renderLeadsReportsView();
     else if (viewKey === 'followups') renderFollowupsView();
     else if (viewKey === 'campaigns') renderCampaignsView('All');
     else if (viewKey === 'reports') renderReportsView();
     else if (viewKey === 'automation') renderAutomationView();
+    else if (viewKey === 'user-management') {
+      if (window.AyushUserManagement) window.AyushUserManagement.renderView(viewDynamic);
+    }
     else if (viewKey === 'team') renderTeamView();
     else if (viewKey === 'settings') renderSettingsView();
   }
@@ -1248,9 +3195,12 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('resetDemoDataBtn')?.addEventListener('click', () => {
       localStorage.removeItem('ayush_crm_partners');
       localStorage.removeItem('ayush_crm_campaigns');
-      state.partners = [...defaultPartners];
+      localStorage.removeItem('ayush_crm_uploads');
+      state.partners = defaultPartners.map((p, i) => normalizePartner(p, i));
       state.campaigns = [...defaultCampaigns];
+      state.uploadHistory = [...defaultUploadHistory];
       userDropdown.classList.remove('open');
+      syncDashboardCounts();
       renderDashboardFollowups();
       renderDashboardCampaigns();
       if (state.currentView !== 'dashboard') switchView(state.currentView);
@@ -1599,10 +3549,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---- MODALS FOR TOP 3 BUTTONS ----
   function closeModal() {
     modalBackdrop.style.display = 'none';
+    modalContent.classList.remove('modal-wide');
   }
 
   modalBackdrop?.addEventListener('click', (e) => {
     if (e.target === modalBackdrop) closeModal();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modalBackdrop?.style.display === 'flex') {
+      closeModal();
+    }
   });
 
   function openAddPartnerModal() {
@@ -1664,7 +3621,32 @@ document.addEventListener('DOMContentLoaded', () => {
       const phone = fd.get('phone').toString().trim();
       const initials = name.replace(/^Dr\.\s*/i, '').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() || 'PR';
 
-      state.partners.unshift({
+      const cleanPhone = phone.replace(/[^0-9]/g, '');
+      const existingPartner = state.partners.find(p => {
+        const sameName = p.name.trim().toLowerCase() === name.toLowerCase();
+        const pDigits = (p.phone || '').replace(/[^0-9]/g, '');
+        const samePhone = cleanPhone.length >= 7 && pDigits === cleanPhone;
+        return sameName || samePhone;
+      });
+
+      if (existingPartner) {
+        existingPartner.name = name;
+        existingPartner.type = type;
+        existingPartner.specialty = specialty;
+        existingPartner.city = city;
+        existingPartner.phone = phone;
+        existingPartner.initials = initials;
+        persistState();
+        syncDashboardCounts();
+        renderDashboardFollowups();
+        closeModal();
+        showToast(`Updated existing partner "${name}" (duplicate prevented)`);
+        if (state.currentView !== 'dashboard') switchView(state.currentView);
+        if (openWaAfterSave) openDirectWhatsAppModal(name, phone);
+        return;
+      }
+
+      state.partners.unshift(normalizePartner({
         id: Date.now(),
         initials,
         color: type === 'Doctors' ? 'avatar-blue' : type === 'Clinics' ? 'avatar-green' : 'avatar-purple',
@@ -1675,10 +3657,13 @@ document.addEventListener('DOMContentLoaded', () => {
         phone,
         status: 'New Lead',
         badge: 'badge-newlead',
-        followup: 'Today, 5:00 PM'
-      });
+        followup: 'Today, 5:00 PM',
+        leadSource: 'Manual Entry',
+        createdDate: todayISO()
+      }, 0));
 
       persistState();
+      syncDashboardCounts();
 
       state.counts.total++;
       if (type === 'Doctors') state.counts.doctors++;
@@ -1732,7 +3717,7 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
         <div class="form-group">
           <label>Follow-up Date &amp; Time *</label>
-          <input type="text" name="time" value="Tomorrow, 11:30 AM" required />
+          ${renderScrollTimePickerHTML('newFuPicker', 'time', 'Tomorrow, 11:30 AM')}
         </div>
         <div class="form-group">
           <label>Lead Stage</label>
@@ -1753,6 +3738,7 @@ document.addEventListener('DOMContentLoaded', () => {
       </form>
     `;
     modalBackdrop.style.display = 'flex';
+    initScrollTimePicker('newFuPicker', 'Tomorrow, 11:30 AM');
     document.getElementById('closeModalBtn').onclick = closeModal;
     document.getElementById('cancelModalBtn').onclick = closeModal;
 
@@ -1791,14 +3777,20 @@ document.addEventListener('DOMContentLoaded', () => {
         'New Lead': 'badge-newlead'
       };
 
-      const existing = state.partners.find(p => p.name.toLowerCase() === name.toLowerCase());
+      const cleanPhoneFu = phone.replace(/[^0-9]/g, '');
+      const existing = state.partners.find(p => {
+        const sameName = p.name.trim().toLowerCase() === name.toLowerCase();
+        const pDigits = (p.phone || '').replace(/[^0-9]/g, '');
+        const samePhone = cleanPhoneFu.length >= 7 && pDigits === cleanPhoneFu;
+        return sameName || samePhone;
+      });
       if (existing) {
         existing.followup = time;
         existing.status = status;
         existing.badge = badgeMap[status] || 'badge-interested';
         existing.phone = phone;
       } else {
-        state.partners.unshift({
+        state.partners.unshift(normalizePartner({
           id: Date.now(),
           initials,
           color: 'avatar-blue',
@@ -1809,11 +3801,14 @@ document.addEventListener('DOMContentLoaded', () => {
           phone,
           status,
           badge: badgeMap[status] || 'badge-interested',
-          followup: time
-        });
+          followup: time,
+          leadSource: 'Follow-up Schedule',
+          createdDate: todayISO()
+        }, 0));
       }
 
       persistState();
+      syncDashboardCounts();
 
       state.pagination.followupsPage = 1;
       state.pagination.dashFollowupsPage = 1;
@@ -2037,4 +4032,21 @@ document.addEventListener('DOMContentLoaded', () => {
       openDirectWhatsAppModal(name, phone);
     }
   });
+
+  // Initialize User Management Module & Hash Routing (#user-management, #activate, #reset-password)
+  if (window.AyushUserManagement) {
+    window.AyushUserManagement.init({
+      toastFn: showToast,
+      modalBackdrop,
+      modalContent,
+    });
+    const handleHashRoute = () => {
+      const h = window.location.hash || '';
+      if (h === '#user-management' || h.startsWith('#activate?') || h.startsWith('#reset-password?')) {
+        switchView('user-management');
+      }
+    };
+    window.addEventListener('hashchange', handleHashRoute);
+    handleHashRoute();
+  }
 });

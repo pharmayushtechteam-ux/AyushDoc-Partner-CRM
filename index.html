@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20261109e" />
+  <link rel="stylesheet" href="styles.css?v=20261126m" />
 </head>
 <body>
   <div class="crm-layout">
@@ -64,7 +64,43 @@
               <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
             </svg>
           </span>
-          <span class="nav-label">Leads &amp; Pipeline</span>
+          <span class="nav-label">Leads &amp; Status</span>
+        </a>
+
+        <a href="#leads-upload" class="nav-item" data-view="leads-upload">
+          <span class="nav-icon nav-icon-blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </span>
+          <span class="nav-label">Leads Upload</span>
+        </a>
+
+        <a href="#settlements" class="nav-item" data-view="settlements">
+          <span class="nav-icon nav-icon-green">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="5" width="20" height="14" rx="2"/>
+              <line x1="2" y1="10" x2="22" y2="10"/>
+              <path d="M16 15h2"/>
+              <path d="M6 15h4"/>
+            </svg>
+          </span>
+          <span class="nav-label">Settlement Tracking</span>
+        </a>
+
+        <a href="#leads-reports" class="nav-item" data-view="leads-reports">
+          <span class="nav-icon nav-icon-blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </span>
+          <span class="nav-label">All Leads Reports</span>
         </a>
 
         <a href="#followups" class="nav-item" data-view="followups">
@@ -109,6 +145,18 @@
             </svg>
           </span>
           <span class="nav-label">Automation</span>
+        </a>
+
+        <a href="#user-management" class="nav-item" data-view="user-management">
+          <span class="nav-icon nav-icon-blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </span>
+          <span class="nav-label">User Management</span>
         </a>
 
         <a href="#team" class="nav-item" data-view="team">
@@ -898,6 +946,8 @@
   <!-- TOAST NOTIFICATION -->
   <div class="crm-toast" id="crmToast"></div>
 
-  <script src="script.js?v=20261109e"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+  <script src="user-management.js?v=20261126n"></script>
+  <script src="script.js?v=20261126o"></script>
 </body>
 </html>
