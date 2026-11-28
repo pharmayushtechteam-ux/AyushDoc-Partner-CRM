@@ -20,10 +20,14 @@
     allUsersBrief: [],
     usersResult: { items: [], total: 0, page: 1, page_size: 10, total_pages: 1 },
     usersQuery: { q: '', role_id: '', department_id: '', team_id: '', status: '', sort_by: 'created_at', sort_dir: 'desc', page: 1, page_size: 10 },
+    teamQuery: { q: '', role_id: '', department_id: '', team_id: '', status: '', page: 1, page_size: 10 },
+    teamUsersResult: { items: [], total: 0, page: 1, page_size: 10, total_pages: 1 },
+    viewMode: 'um', // um | team
     logsResult: { items: [], total: 0, page: 1, page_size: 15, total_pages: 1 },
     logsQuery: { q: '', action: '', page: 1, page_size: 15 },
     lastInviteLink: null,
     lastInviteNote: '',
+    prefillEmail: '',
     container: null,
     toastFn: (msg) => console.log(msg),
     modalBackdrop: null,
@@ -63,6 +67,57 @@
     return Boolean(umState.permissions?.[moduleKey]?.[action]);
   }
 
+  function buildWindowedPages(currentPage, totalPages) {
+    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+    const pages = [1];
+    const start = Math.max(2, currentPage - 1);
+    const end = Math.min(totalPages - 1, currentPage + 1);
+    if (start > 2) pages.push('...');
+    for (let p = start; p <= end; p++) pages.push(p);
+    if (end < totalPages - 1) pages.push('...');
+    pages.push(totalPages);
+    return pages;
+  }
+
+  function suggestNextEmployeeId() {
+    let maxNum = 0;
+    (umState.allUsersBrief || []).forEach(u => {
+      const m = String(u.employee_id || '').match(/(\d+)/);
+      if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+    });
+    return `EMP-${String(maxNum + 1).padStart(3, '0')}`;
+  }
+
+  function countRolePermissions(perms) {
+    let totalEnabled = 0;
+    let modulesWithView = 0;
+    (umState.modules || []).forEach(m => {
+      const p = perms?.[m.key] || {};
+      if (p.view) modulesWithView += 1;
+      (umState.actions || []).forEach(a => {
+        if (p[a]) totalEnabled += 1;
+      });
+    });
+    return { totalEnabled, modulesWithView };
+  }
+
+  function extractTokenFromInput(rawVal) {
+    const s = String(rawVal || '').trim();
+    if (!s) return '';
+    if (s.includes('token=')) {
+      const qIdx = s.indexOf('?');
+      const qStr = qIdx >= 0 ? s.slice(qIdx + 1) : s.slice(s.indexOf('token='));
+      const tok = new URLSearchParams(qStr).get('token');
+      if (tok) return tok.trim();
+    }
+    return s;
+  }
+
+  function rerenderActiveContainer() {
+    if (!umState.container) return Promise.resolve();
+    return umState.viewMode === 'team' ? renderTeamRolesView(umState.container) : renderView(umState.container);
+  }
+
   async function api(url, opts = {}) {
     const fetchOpts = {
       credentials: 'same-origin',
@@ -82,13 +137,26 @@
   }
 
   function syncHeaderUser() {
-    if (!umState.authenticated || !umState.user) return;
     const nameEl = document.getElementById('headerUserName');
     const orgEl = document.getElementById('headerUserOrg');
     const avEl = document.getElementById('headerUserAvatar');
-    if (nameEl) nameEl.textContent = umState.user.full_name;
-    if (orgEl) orgEl.textContent = umState.user.role_name;
-    if (avEl) avEl.textContent = initialsOf(umState.user.full_name);
+    if (umState.authenticated && umState.user) {
+      if (nameEl) nameEl.textContent = umState.user.full_name;
+      if (orgEl) orgEl.textContent = umState.user.role_name;
+      if (avEl) avEl.textContent = initialsOf(umState.user.full_name);
+    } else if (umState.authLoaded) {
+      if (nameEl) nameEl.textContent = umState.needsSetup ? 'Setup Admin' : 'Sign In';
+      if (orgEl) orgEl.textContent = 'AyushDoc+ CRM';
+      if (avEl) avEl.textContent = 'AD';
+    }
+    window.dispatchEvent(new CustomEvent('ayush-auth-changed', {
+      detail: {
+        authenticated: umState.authenticated,
+        needsSetup: umState.needsSetup,
+        user: umState.user,
+        permissions: umState.permissions,
+      },
+    }));
   }
 
   function openModal(html, wide = true) {
@@ -157,45 +225,54 @@
     const c = umState.container;
     if (!c) return;
 
+    const backHome = async () => {
+      window.location.hash = umState.viewMode === 'team' ? '#team' : '#user-management';
+      await refreshAuthStatus().catch(() => {});
+      if (umState.authenticated) {
+        await rerenderActiveContainer();
+      } else {
+        renderAuthView();
+      }
+    };
+
     if (forcedMode === 'activate') {
       c.innerHTML = `
         <div class="um-auth-card">
           <h2>Activate Your CRM Account</h2>
-          <p>Set a strong password (minimum 8 characters) to activate your AyushDoc+ Partner CRM account.</p>
+          <p>Paste your invitation token (or full invite URL) and set a strong password (minimum 8 characters) to activate your AyushDoc+ Partner CRM account.</p>
           <div id="umAuthAlert"></div>
           <form id="umActivateForm">
             <div class="form-group">
-              <label>Invitation Token *</label>
-              <input type="text" name="token" value="${esc(token)}" required />
+              <label>Invitation Token or Invite Link *</label>
+              <input type="text" name="token" value="${esc(token)}" required placeholder="Paste token or #activate?token=... link" />
             </div>
             <div class="form-group">
               <label>Create Password (min 8 chars) *</label>
               <input type="password" name="password" minlength="8" required placeholder="Enter a strong password" />
             </div>
-            <div class="modal-actions">
-              <button type="button" class="btn btn-outline" id="umBackToLoginBtn">Back to Sign In</button>
+            <div class="modal-actions modal-actions-split">
+              <button type="button" class="btn btn-outline" id="umBackToLoginBtn">← Back</button>
               <button type="submit" class="btn btn-primary">Activate Account</button>
             </div>
           </form>
         </div>
       `;
-      document.getElementById('umBackToLoginBtn')?.addEventListener('click', () => {
-        window.location.hash = '#user-management';
-        renderAuthView();
-      });
+      document.getElementById('umBackToLoginBtn')?.addEventListener('click', backHome);
       document.getElementById('umActivateForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
         const fd = new FormData(e.target);
         const alertBox = document.getElementById('umAuthAlert');
         try {
+          const cleanToken = extractTokenFromInput(fd.get('token'));
           const res = await api('/api/auth/activate', {
             method: 'POST',
-            body: JSON.stringify({ token: fd.get('token'), password: fd.get('password') }),
+            body: JSON.stringify({ token: cleanToken, password: fd.get('password') }),
           });
+          if (res.email) umState.prefillEmail = res.email;
           alertBox.innerHTML = `<div class="um-alert um-alert-success">${esc(res.message)}</div>`;
           umState.toastFn(res.message);
-          window.location.hash = '#user-management';
-          setTimeout(() => renderAuthView(), 1200);
+          window.location.hash = umState.viewMode === 'team' ? '#team' : '#user-management';
+          setTimeout(() => renderAuthView(), 1100);
         } catch (err) {
           alertBox.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
         }
@@ -207,41 +284,68 @@
       c.innerHTML = `
         <div class="um-auth-card">
           <h2>Reset Your Password</h2>
-          <p>Enter your secure reset token and choose a new password (minimum 8 characters).</p>
+          <p>Request a one-time reset token by email or paste an administrator-issued reset token below.</p>
           <div id="umAuthAlert"></div>
-          <form id="umResetForm">
+
+          <div class="um-reset-request-box">
+            <div class="um-reset-req-title">Step 1: Need a Reset Token?</div>
+            <form id="umRequestResetForm" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;">
+              <input type="email" name="email" value="${esc(umState.prefillEmail || '')}" required placeholder="Enter your registered email" style="flex:1;min-width:190px;" />
+              <button type="submit" class="btn btn-outline" style="white-space:nowrap;">Generate Reset Token</button>
+            </form>
+          </div>
+
+          <form id="umResetForm" style="margin-top:16px;">
             <div class="form-group">
-              <label>Reset Token *</label>
-              <input type="text" name="token" value="${esc(token)}" required />
+              <label>Step 2: Reset Token or Link *</label>
+              <input type="text" name="token" id="umResetTokenInput" value="${esc(token)}" required placeholder="Paste reset token or #reset-password?token=... link" />
             </div>
             <div class="form-group">
               <label>New Password (min 8 chars) *</label>
               <input type="password" name="new_password" minlength="8" required placeholder="Enter new password" />
             </div>
-            <div class="modal-actions">
-              <button type="button" class="btn btn-outline" id="umBackToLoginBtn">Back to Sign In</button>
+            <div class="modal-actions modal-actions-split">
+              <button type="button" class="btn btn-outline" id="umBackToLoginBtn">← Back</button>
               <button type="submit" class="btn btn-primary">Update Password</button>
             </div>
           </form>
         </div>
       `;
-      document.getElementById('umBackToLoginBtn')?.addEventListener('click', () => {
-        window.location.hash = '#user-management';
-        renderAuthView();
+      document.getElementById('umBackToLoginBtn')?.addEventListener('click', backHome);
+      document.getElementById('umRequestResetForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const alertBox = document.getElementById('umAuthAlert');
+        try {
+          const email = String(fd.get('email') || '').trim();
+          const res = await api('/api/auth/request-reset', {
+            method: 'POST',
+            body: JSON.stringify({ email }),
+          });
+          umState.prefillEmail = email;
+          const tokInp = document.getElementById('umResetTokenInput');
+          if (tokInp && res.reset_token) tokInp.value = res.reset_token;
+          alertBox.innerHTML = `<div class="um-alert um-alert-success">${esc(res.message)} ${esc(res.email_note || '')} Token pre-filled below.</div>`;
+          umState.toastFn(res.message);
+        } catch (err) {
+          alertBox.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
+        }
       });
       document.getElementById('umResetForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
         const fd = new FormData(e.target);
         const alertBox = document.getElementById('umAuthAlert');
         try {
+          const cleanToken = extractTokenFromInput(fd.get('token'));
           const res = await api('/api/auth/reset-password', {
             method: 'POST',
-            body: JSON.stringify({ token: fd.get('token'), new_password: fd.get('new_password') }),
+            body: JSON.stringify({ token: cleanToken, new_password: fd.get('new_password') }),
           });
+          if (res.email) umState.prefillEmail = res.email;
           alertBox.innerHTML = `<div class="um-alert um-alert-success">${esc(res.message)}</div>`;
           umState.toastFn(res.message);
-          window.location.hash = '#user-management';
-          setTimeout(() => renderAuthView(), 1200);
+          window.location.hash = umState.viewMode === 'team' ? '#team' : '#user-management';
+          setTimeout(() => renderAuthView(), 1100);
         } catch (err) {
           alertBox.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
         }
@@ -253,7 +357,7 @@
       c.innerHTML = `
         <div class="um-auth-card">
           <h2>Initial Super Admin Setup</h2>
-          <p>No users exist in the database yet. Create your first <strong>Super Admin</strong> account to initialize User Management &amp; Role-Based Access Control.</p>
+          <p>No users exist in the database yet. Create your first <strong>Super Admin</strong> account to initialize User Management &amp; Role-Based Access Control. This setup can only be completed once.</p>
           <div id="umAuthAlert"></div>
           <form id="umSetupForm">
             <div class="form-group">
@@ -297,7 +401,7 @@
           });
           umState.toastFn(res.message);
           await refreshAuthStatus();
-          await renderView(umState.container);
+          await rerenderActiveContainer();
         } catch (err) {
           alertBox.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
         }
@@ -307,13 +411,13 @@
 
     c.innerHTML = `
       <div class="um-auth-card">
-        <h2>Sign In to User Management</h2>
-        <p>Authenticate with your AyushDoc+ CRM credentials to access role-protected User Management features.</p>
+        <h2>Sign In to AyushDoc+ CRM</h2>
+        <p>Authenticate with your AyushDoc+ CRM credentials to access role-protected User Management, Team &amp; Roles features.</p>
         <div id="umAuthAlert"></div>
         <form id="umLoginForm">
           <div class="form-group">
             <label>Email Address *</label>
-            <input type="email" name="email" required placeholder="name@ayushdoc.in" />
+            <input type="email" name="email" value="${esc(umState.prefillEmail || '')}" required placeholder="name@ayushdoc.in" />
           </div>
           <div class="form-group">
             <label>Password *</label>
@@ -340,9 +444,10 @@
           method: 'POST',
           body: JSON.stringify({ email: fd.get('email'), password: fd.get('password') }),
         });
+        umState.prefillEmail = '';
         umState.toastFn(res.message);
         await refreshAuthStatus();
-        await renderView(umState.container);
+        await rerenderActiveContainer();
       } catch (err) {
         alertBox.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
       }
@@ -374,6 +479,15 @@
     umState.usersResult = await api(`/api/um/users?${params.toString()}`);
   }
 
+  async function loadTeamUsersTable() {
+    const q = umState.teamQuery;
+    const params = new URLSearchParams();
+    Object.entries(q).forEach(([k, v]) => {
+      if (v !== '' && v !== null && v !== undefined) params.set(k, String(v));
+    });
+    umState.teamUsersResult = await api(`/api/um/users?${params.toString()}`);
+  }
+
   async function loadLogsTable() {
     const q = umState.logsQuery;
     const params = new URLSearchParams();
@@ -385,6 +499,7 @@
 
   // ---------------- MAIN RENDER SHELL ----------------
   async function renderView(container) {
+    umState.viewMode = 'um';
     umState.container = container;
     container.innerHTML = `<div class="panel-card"><div class="um-empty-state">Loading User Management...</div></div>`;
 
@@ -447,30 +562,36 @@
     const d = umState.dashboard || {};
     container.innerHTML = `
       <section class="um-kpi-grid">
-        <div class="um-kpi-card accent-blue">
+        <button type="button" class="um-kpi-card um-kpi-clickable accent-blue" data-kpi-nav="users" data-kpi-status="">
           <div class="um-kpi-label">Total Users</div>
           <div class="um-kpi-val">${d.total_users ?? 0}</div>
-        </div>
-        <div class="um-kpi-card accent-green">
+          <div class="um-kpi-sub">${d.administrators ?? 0} Admins • ${d.employees ?? 0} Team</div>
+        </button>
+        <button type="button" class="um-kpi-card um-kpi-clickable accent-green" data-kpi-nav="users" data-kpi-status="Active">
           <div class="um-kpi-label">Active Users</div>
           <div class="um-kpi-val">${d.active_users ?? 0}</div>
-        </div>
-        <div class="um-kpi-card accent-red">
+          <div class="um-kpi-sub">Click to view active</div>
+        </button>
+        <button type="button" class="um-kpi-card um-kpi-clickable accent-red" data-kpi-nav="users" data-kpi-status="Inactive">
           <div class="um-kpi-label">Inactive Users</div>
           <div class="um-kpi-val">${d.inactive_users ?? 0}</div>
-        </div>
-        <div class="um-kpi-card accent-amber">
+          <div class="um-kpi-sub">Click to view inactive</div>
+        </button>
+        <button type="button" class="um-kpi-card um-kpi-clickable accent-purple" data-kpi-nav="roles">
+          <div class="um-kpi-label">Roles</div>
+          <div class="um-kpi-val">${d.total_roles ?? umState.roles.length}</div>
+          <div class="um-kpi-sub">${d.system_roles ?? 5} System • ${d.custom_roles ?? 0} Custom</div>
+        </button>
+        <button type="button" class="um-kpi-card um-kpi-clickable accent-amber" data-kpi-nav="users" data-kpi-status="Pending">
           <div class="um-kpi-label">Pending Invitations</div>
           <div class="um-kpi-val">${d.pending_invitations ?? 0}</div>
-        </div>
-        <div class="um-kpi-card accent-purple">
-          <div class="um-kpi-label">Administrators</div>
-          <div class="um-kpi-val">${d.administrators ?? 0}</div>
-        </div>
-        <div class="um-kpi-card accent-teal">
-          <div class="um-kpi-label">Employees</div>
-          <div class="um-kpi-val">${d.employees ?? 0}</div>
-        </div>
+          <div class="um-kpi-sub">Awaiting activation</div>
+        </button>
+        <button type="button" class="um-kpi-card um-kpi-clickable accent-teal" data-kpi-nav="org">
+          <div class="um-kpi-label">Depts &amp; Teams</div>
+          <div class="um-kpi-val">${d.total_departments ?? umState.departments.length} <span style="font-size:15px;font-weight:700;color:#64748b;">/ ${d.total_teams ?? umState.teams.length}</span></div>
+          <div class="um-kpi-sub">Org structure</div>
+        </button>
       </section>
 
       <div class="panel-card" style="padding:14px 18px;">
@@ -499,12 +620,25 @@
           <div class="um-link-copy-box">
             <input type="text" readonly value="${esc(umState.lastInviteLink)}" id="umGeneratedLinkInput" />
             <button type="button" class="action-pill-btn pill-blue" id="umCopyLinkBtn">Copy Link</button>
+            <button type="button" class="action-pill-btn pill-green" id="umOpenGeneratedLinkBtn">Open Link Now</button>
           </div>
         </div>
       ` : ''}
 
       <div id="umTabBody"></div>
     `;
+
+    container.querySelectorAll('[data-kpi-nav]').forEach(card => {
+      card.addEventListener('click', () => {
+        const nav = card.getAttribute('data-kpi-nav');
+        umState.activeTab = nav;
+        if (nav === 'users') {
+          umState.usersQuery.status = card.getAttribute('data-kpi-status') ?? '';
+          umState.usersQuery.page = 1;
+        }
+        renderView(container);
+      });
+    });
 
     container.querySelectorAll('#umSubTabs [data-um-tab]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -528,6 +662,12 @@
         umState.toastFn('Copied secure link to clipboard!');
       }
     });
+    document.getElementById('umOpenGeneratedLinkBtn')?.addEventListener('click', () => {
+      const link = umState.lastInviteLink || '';
+      const tok = extractTokenFromInput(link);
+      const mode = link.includes('reset-password') ? 'reset' : 'activate';
+      renderAuthView(mode, tok);
+    });
 
     const bodyEl = document.getElementById('umTabBody');
     if (umState.activeTab === 'users') renderUsersTab(bodyEl);
@@ -543,7 +683,9 @@
       umState.toastFn('Signed out successfully.');
       umState.lastInviteLink = null;
       await refreshAuthStatus();
-      renderView(umState.container);
+      if (umState.container && (umState.viewMode === 'um' || umState.viewMode === 'team')) {
+        await rerenderActiveContainer();
+      }
     } catch (err) {
       umState.toastFn(err.message);
     }
@@ -554,12 +696,15 @@
     const q = umState.usersQuery;
     const res = umState.usersResult;
     const sortArrow = (col) => (q.sort_by === col ? (q.sort_dir === 'asc' ? '▲' : '▼') : '↕');
+    const hasActiveFilters = Boolean(q.q || q.role_id || q.department_id || q.team_id || q.status);
+    const pages = buildWindowedPages(res.page, res.total_pages);
 
     bodyEl.innerHTML = `
       <div class="panel-card">
         <div class="panel-header">
           <div class="panel-title"><h2>User Directory (${res.total})</h2></div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            ${hasActiveFilters ? `<button class="btn btn-outline" id="umResetFiltersBtn">Reset Filters</button>` : ''}
             ${can('user_management', 'export') ? `<button class="btn btn-outline" id="umExportUsersBtn">Export CSV</button>` : ''}
             ${can('user_management', 'create') ? `<button class="btn btn-primary" id="umOpenAddUserBtn">+ Add New User</button>` : ''}
           </div>
@@ -582,6 +727,9 @@
           <select id="umFilterStatus">
             <option value="">All Statuses</option>
             ${['Active', 'Inactive', 'Pending'].map(s => `<option value="${s}" ${q.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+          <select id="umPageSizeSelect" title="Rows per page">
+            ${[5, 10, 25, 50].map(sz => `<option value="${sz}" ${Number(q.page_size) === sz ? 'selected' : ''}>${sz} / page</option>`).join('')}
           </select>
         </div>
 
@@ -636,10 +784,14 @@
                       <div class="followup-actions" style="gap:5px;flex-wrap:wrap;">
                         <button type="button" class="action-pill-btn pill-blue" data-um-view="${u.id}">Profile</button>
                         ${can('user_management', 'edit') ? `<button type="button" class="action-pill-btn" data-um-edit="${u.id}">Edit</button>` : ''}
+                        ${can('user_management', 'edit') && u.status === 'Pending' ? `
+                          <button type="button" class="action-pill-btn pill-amber" data-um-invite-user="${u.id}">Invite Link</button>
+                        ` : ''}
                         ${can('user_management', 'edit') && u.status !== 'Pending' ? `
                           <button type="button" class="action-pill-btn ${u.status === 'Active' ? '' : 'pill-green'}" data-um-toggle="${u.id}" data-next-status="${u.status === 'Active' ? 'Inactive' : 'Active'}">
                             ${u.status === 'Active' ? 'Deactivate' : 'Activate'}
                           </button>
+                          <button type="button" class="action-pill-btn" data-um-reset-pw="${u.id}" title="Generate password reset link">Reset PW</button>
                         ` : ''}
                         ${can('user_management', 'delete') && u.id !== umState.user.id ? `
                           <button type="button" class="action-pill-btn" style="color:#b91c1c;border-color:#fecaca;" data-um-delete="${u.id}" data-um-name="${esc(u.full_name)}">Delete</button>
@@ -653,10 +805,14 @@
           </div>
           <div class="pagination-bar">
             <div class="pagination-info">
-              <span>Page <strong>${res.page}</strong> of <strong>${res.total_pages}</strong> (${res.total} users)</span>
+              <span>Showing <strong>${res.items.length}</strong> of <strong>${res.total}</strong> users (Page <strong>${res.page}</strong> of <strong>${res.total_pages}</strong>)</span>
             </div>
             <div class="pagination-controls">
               <button class="page-btn" id="umUsersPrev" ${res.page <= 1 ? 'disabled' : ''}>‹ Prev</button>
+              ${pages.map(p => p === '...'
+                ? `<span class="page-ellipsis">…</span>`
+                : `<button class="page-btn ${p === res.page ? 'active' : ''}" data-um-page="${p}">${p}</button>`
+              ).join('')}
               <button class="page-btn" id="umUsersNext" ${res.page >= res.total_pages ? 'disabled' : ''}>Next ›</button>
             </div>
           </div>
@@ -679,7 +835,7 @@
 
     const bindSel = (id, key) => {
       document.getElementById(id)?.addEventListener('change', async (e) => {
-        umState.usersQuery[key] = e.target.value;
+        umState.usersQuery[key] = key === 'page_size' ? Number(e.target.value) : e.target.value;
         umState.usersQuery.page = 1;
         await loadUsersTable();
         renderUsersTab(bodyEl);
@@ -689,6 +845,13 @@
     bindSel('umFilterDept', 'department_id');
     bindSel('umFilterTeam', 'team_id');
     bindSel('umFilterStatus', 'status');
+    bindSel('umPageSizeSelect', 'page_size');
+
+    document.getElementById('umResetFiltersBtn')?.addEventListener('click', async () => {
+      umState.usersQuery = { ...umState.usersQuery, q: '', role_id: '', department_id: '', team_id: '', status: '', page: 1 };
+      await loadUsersTable();
+      renderUsersTab(bodyEl);
+    });
 
     bodyEl.querySelectorAll('[data-sort]').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -713,6 +876,13 @@
       umState.usersQuery.page = Math.min(res.total_pages, umState.usersQuery.page + 1);
       await loadUsersTable();
       renderUsersTab(bodyEl);
+    });
+    bodyEl.querySelectorAll('[data-um-page]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        umState.usersQuery.page = Number(btn.getAttribute('data-um-page'));
+        await loadUsersTable();
+        renderUsersTab(bodyEl);
+      });
     });
 
     document.getElementById('umOpenAddUserBtn')?.addEventListener('click', () => openUserFormModal(null));
@@ -741,6 +911,36 @@
       });
     });
 
+    bodyEl.querySelectorAll('[data-um-invite-user]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const uid = Number(btn.getAttribute('data-um-invite-user'));
+        try {
+          const out = await api(`/api/um/users/${uid}/resend-invite`, { method: 'POST', body: '{}' });
+          umState.lastInviteLink = out.activation_link;
+          umState.lastInviteNote = `${out.message} ${out.email_note || ''}`;
+          umState.toastFn(out.message);
+          await rerenderActiveContainer();
+        } catch (err) {
+          umState.toastFn(err.message);
+        }
+      });
+    });
+
+    bodyEl.querySelectorAll('[data-um-reset-pw]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const uid = Number(btn.getAttribute('data-um-reset-pw'));
+        try {
+          const out = await api(`/api/um/users/${uid}/reset-password`, { method: 'POST', body: '{}' });
+          umState.lastInviteLink = out.reset_link;
+          umState.lastInviteNote = `${out.message} ${out.email_note || ''}`;
+          umState.toastFn(out.message);
+          await rerenderActiveContainer();
+        } catch (err) {
+          umState.toastFn(err.message);
+        }
+      });
+    });
+
     bodyEl.querySelectorAll('[data-um-toggle]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const uid = Number(btn.getAttribute('data-um-toggle'));
@@ -751,7 +951,7 @@
             body: JSON.stringify({ status: nextSt }),
           });
           umState.toastFn(out.message);
-          await renderView(umState.container);
+          await rerenderActiveContainer();
         } catch (err) {
           umState.toastFn(err.message);
         }
@@ -781,7 +981,7 @@
             const out = await api(`/api/um/users/${uid}`, { method: 'DELETE' });
             closeModal();
             umState.toastFn(out.message);
-            await renderView(umState.container);
+            await rerenderActiveContainer();
           } catch (err) {
             document.getElementById('umDelErr').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
           }
@@ -795,6 +995,7 @@
     const isEdit = Boolean(existingUser);
     const u = existingUser || {};
     const assignableRoles = umState.roles.filter(r => r.is_active && (r.slug !== 'super_admin' || umState.user?.role_slug === 'super_admin'));
+    const defaultEmpId = isEdit ? (u.employee_id || '') : suggestNextEmployeeId();
     let avatarDataUrl = '';
 
     openModal(`
@@ -821,7 +1022,7 @@
           </div>
           <div class="form-group">
             <label>Employee ID *</label>
-            <input type="text" name="employee_id" value="${esc(u.employee_id || '')}" required placeholder="e.g. EMP-102" />
+            <input type="text" name="employee_id" value="${esc(defaultEmpId)}" required placeholder="e.g. EMP-007" />
           </div>
         </div>
         <div class="form-grid-2">
@@ -880,11 +1081,18 @@
               <input type="password" name="password" minlength="8" placeholder="Optional (min 8 chars)" />
             </div>
           ` : `
-            <div class="form-group" style="justify-content:flex-end;">
-              <button type="button" class="btn btn-outline" id="umGenResetLinkBtn">Generate Password Reset Link</button>
+            <div class="form-group">
+              <label>Set / Override Password (optional)</label>
+              <input type="password" name="password" minlength="8" placeholder="Leave blank to keep current password" />
             </div>
           `}
         </div>
+        ${isEdit ? `
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <button type="button" class="action-pill-btn" id="umGenResetLinkBtn">🔑 Generate Password Reset Link</button>
+            ${u.status === 'Pending' ? `<button type="button" class="action-pill-btn pill-amber" id="umResendInviteModalBtn">🔗 Generate Activation Invite Link</button>` : ''}
+          </div>
+        ` : ''}
         <div class="modal-actions">
           <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
           <button type="submit" class="btn btn-primary">${isEdit ? 'Save User Changes' : 'Create User'}</button>
@@ -907,7 +1115,20 @@
         umState.lastInviteNote = `${res.message} ${res.email_note || ''}`;
         closeModal();
         umState.toastFn(res.message);
-        await renderView(umState.container);
+        await rerenderActiveContainer();
+      } catch (err) {
+        document.getElementById('umUserFormAlert').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
+      }
+    });
+
+    document.getElementById('umResendInviteModalBtn')?.addEventListener('click', async () => {
+      try {
+        const res = await api(`/api/um/users/${u.id}/resend-invite`, { method: 'POST', body: '{}' });
+        umState.lastInviteLink = res.activation_link;
+        umState.lastInviteNote = `${res.message} ${res.email_note || ''}`;
+        closeModal();
+        umState.toastFn(res.message);
+        await rerenderActiveContainer();
       } catch (err) {
         document.getElementById('umUserFormAlert').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
       }
@@ -917,6 +1138,7 @@
       e.preventDefault();
       const fd = new FormData(e.target);
       const payload = Object.fromEntries(fd.entries());
+      if (!payload.password) delete payload.password;
       if (avatarDataUrl) payload.avatar_data = avatarDataUrl;
       const alertBox = document.getElementById('umUserFormAlert');
       try {
@@ -929,7 +1151,7 @@
         }
         closeModal();
         umState.toastFn(res.message);
-        await renderView(umState.container);
+        await rerenderActiveContainer();
       } catch (err) {
         alertBox.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
       }
@@ -951,17 +1173,21 @@
                 <th>Role Name</th>
                 <th>Type</th>
                 <th>Assigned Users</th>
+                <th>Access Scope</th>
                 <th>Status</th>
                 <th>Description</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              ${umState.roles.map(r => `
+              ${umState.roles.map(r => {
+                const counts = countRolePermissions(r.permissions);
+                return `
                 <tr>
                   <td class="td-primary"><strong>${esc(r.name)}</strong></td>
                   <td><span class="status-badge ${r.is_system ? 'badge-contacted' : 'badge-meeting'}">${r.is_system ? 'System' : 'Custom'}</span></td>
                   <td><strong>${r.user_count}</strong> users</td>
+                  <td><span class="status-badge badge-onboarded">${counts.modulesWithView}/${umState.modules.length} modules • ${counts.totalEnabled} perms</span></td>
                   <td>${statusBadge(r.is_active ? 'Active' : 'Inactive')}</td>
                   <td><span class="entity-sub">${esc(r.description || '—')}</span></td>
                   <td class="td-action">
@@ -970,10 +1196,13 @@
                       ${can('user_management', 'edit') && r.slug !== 'super_admin' ? `
                         <button type="button" class="action-pill-btn" data-role-edit="${r.id}">Permissions</button>
                       ` : ''}
+                      ${can('user_management', 'delete') && !r.is_system ? `
+                        <button type="button" class="action-pill-btn" style="color:#b91c1c;border-color:#fecaca;" data-role-delete="${r.id}" data-role-name="${esc(r.name)}">Delete</button>
+                      ` : ''}
                     </div>
                   </td>
                 </tr>
-              `).join('')}
+              `; }).join('')}
             </tbody>
           </table>
         </div>
@@ -986,6 +1215,35 @@
         const rid = Number(btn.getAttribute('data-role-edit'));
         const roleObj = umState.roles.find(r => r.id === rid);
         if (roleObj) openRoleModal(roleObj);
+      });
+    });
+
+    bodyEl.querySelectorAll('[data-role-delete]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const rid = Number(btn.getAttribute('data-role-delete'));
+        const rName = btn.getAttribute('data-role-name');
+        openModal(`
+          <div class="modal-header">
+            <h3>Delete Custom Role</h3>
+            <button type="button" class="modal-close" id="closeModalBtn">✕</button>
+          </div>
+          <p style="font-size:13.5px;color:#334155;">Are you sure you want to delete custom role <strong>${esc(rName)}</strong>? Roles with assigned users cannot be deleted until users are reassigned.</p>
+          <div id="umDelRoleErr" style="margin-top:10px;"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
+            <button type="button" class="btn btn-primary" style="background:#dc2626;" id="umConfirmRoleDelBtn">Delete Role</button>
+          </div>
+        `, false);
+        document.getElementById('umConfirmRoleDelBtn')?.addEventListener('click', async () => {
+          try {
+            const out = await api(`/api/um/roles/${rid}`, { method: 'DELETE' });
+            closeModal();
+            umState.toastFn(out.message);
+            await rerenderActiveContainer();
+          } catch (err) {
+            document.getElementById('umDelRoleErr').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
+          }
+        });
       });
     });
 
@@ -1055,17 +1313,27 @@
         </div>
 
         <div style="margin-top:8px;">
-          <label style="font-size:12.5px;font-weight:700;color:#334155;">Module Permissions Matrix (${umState.modules.length} CRM Modules × 6 Actions)</label>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <label style="font-size:12.5px;font-weight:700;color:#334155;">Module Permissions Matrix (${umState.modules.length} CRM Modules × 6 Actions)</label>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="action-pill-btn pill-blue" id="umPermSelectViewBtn">View Only All</button>
+              <button type="button" class="action-pill-btn pill-green" id="umPermSelectAllBtn">Select All</button>
+              <button type="button" class="action-pill-btn" id="umPermClearAllBtn">Clear All</button>
+            </div>
+          </div>
           <div style="max-height:330px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:10px;margin-top:6px;">
           <table class="um-perm-table" style="margin-top:0;">
             <thead style="position:sticky;top:0;background:#f8fafc;z-index:2;">
               <tr>
                 <th>CRM Module</th>
                 ${umState.actions.map(a => `<th>${esc(a)}</th>`).join('')}
+                <th>All</th>
               </tr>
             </thead>
             <tbody>
-              ${umState.modules.map(m => `
+              ${umState.modules.map(m => {
+                const allChecked = umState.actions.every(a => r.permissions?.[m.key]?.[a]);
+                return `
                 <tr>
                   <td>${esc(m.label)}</td>
                   ${umState.actions.map(a => `
@@ -1073,8 +1341,11 @@
                       <input type="checkbox" data-perm-mod="${m.key}" data-perm-act="${a}" ${r.permissions?.[m.key]?.[a] ? 'checked' : ''} />
                     </td>
                   `).join('')}
+                  <td>
+                    <input type="checkbox" data-perm-row="${m.key}" ${allChecked ? 'checked' : ''} title="Toggle all permissions for ${esc(m.label)}" />
+                  </td>
                 </tr>
-              `).join('')}
+              `; }).join('')}
             </tbody>
           </table>
           </div>
@@ -1086,6 +1357,26 @@
         </div>
       </form>
     `, true);
+
+    umState.modalContent.querySelectorAll('[data-perm-row]').forEach(rowChk => {
+      rowChk.addEventListener('change', () => {
+        const mod = rowChk.getAttribute('data-perm-row');
+        umState.modalContent.querySelectorAll(`[data-perm-mod="${mod}"]`).forEach(c => { c.checked = rowChk.checked; });
+      });
+    });
+
+    document.getElementById('umPermSelectAllBtn')?.addEventListener('click', () => {
+      umState.modalContent.querySelectorAll('[data-perm-mod], [data-perm-row]').forEach(c => { c.checked = true; });
+    });
+    document.getElementById('umPermClearAllBtn')?.addEventListener('click', () => {
+      umState.modalContent.querySelectorAll('[data-perm-mod], [data-perm-row]').forEach(c => { c.checked = false; });
+    });
+    document.getElementById('umPermSelectViewBtn')?.addEventListener('click', () => {
+      umState.modalContent.querySelectorAll('[data-perm-mod]').forEach(c => {
+        c.checked = c.getAttribute('data-perm-act') === 'view';
+      });
+      umState.modalContent.querySelectorAll('[data-perm-row]').forEach(c => { c.checked = false; });
+    });
 
     document.getElementById('umRoleForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1110,7 +1401,7 @@
           : await api('/api/um/roles', { method: 'POST', body: JSON.stringify(payload) });
         closeModal();
         umState.toastFn(res.message);
-        await renderView(umState.container);
+        await rerenderActiveContainer();
       } catch (err) {
         document.getElementById('umRoleAlert').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
       }
@@ -1141,9 +1432,10 @@
                       <td>${esc(d.head_name || '—')}</td>
                       <td><strong>${d.employee_count}</strong></td>
                       <td class="td-action">
-                        <div class="followup-actions" style="gap:5px;">
+                        <div class="followup-actions" style="gap:5px;flex-wrap:wrap;">
                           <button type="button" class="action-pill-btn pill-blue" data-dept-users="${d.id}" data-dept-name="${esc(d.name)}">View</button>
                           ${can('user_management', 'edit') ? `<button type="button" class="action-pill-btn" data-dept-edit="${d.id}">Edit</button>` : ''}
+                          ${can('user_management', 'delete') ? `<button type="button" class="action-pill-btn" style="color:#b91c1c;border-color:#fecaca;" data-dept-delete="${d.id}" data-dept-name="${esc(d.name)}">Delete</button>` : ''}
                         </div>
                       </td>
                     </tr>
@@ -1174,9 +1466,10 @@
                       <td>${esc(t.manager_name || '—')}</td>
                       <td><strong>${t.member_count}</strong></td>
                       <td class="td-action">
-                        <div class="followup-actions" style="gap:5px;">
+                        <div class="followup-actions" style="gap:5px;flex-wrap:wrap;">
                           <button type="button" class="action-pill-btn pill-blue" data-team-users="${t.id}" data-team-name="${esc(t.name)}">Members</button>
                           ${can('user_management', 'edit') ? `<button type="button" class="action-pill-btn" data-team-edit="${t.id}">Edit</button>` : ''}
+                          ${can('user_management', 'delete') ? `<button type="button" class="action-pill-btn" style="color:#b91c1c;border-color:#fecaca;" data-team-delete="${t.id}" data-team-name="${esc(t.name)}">Delete</button>` : ''}
                         </div>
                       </td>
                     </tr>
@@ -1291,6 +1584,64 @@
       });
     });
 
+    bodyEl.querySelectorAll('[data-dept-delete]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const did = Number(btn.getAttribute('data-dept-delete'));
+        const name = btn.getAttribute('data-dept-name');
+        openModal(`
+          <div class="modal-header">
+            <h3>Delete Department</h3>
+            <button type="button" class="modal-close" id="closeModalBtn">✕</button>
+          </div>
+          <p style="font-size:13.5px;color:#334155;">Delete department <strong>${esc(name)}</strong>? Assigned employees and teams will become unassigned cleanly.</p>
+          <div id="umDelDeptErr" style="margin-top:10px;"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
+            <button type="button" class="btn btn-primary" style="background:#dc2626;" id="umConfirmDeptDelBtn">Delete Department</button>
+          </div>
+        `, false);
+        document.getElementById('umConfirmDeptDelBtn')?.addEventListener('click', async () => {
+          try {
+            const out = await api(`/api/um/departments/${did}`, { method: 'DELETE' });
+            closeModal();
+            umState.toastFn(out.message);
+            await rerenderActiveContainer();
+          } catch (err) {
+            document.getElementById('umDelDeptErr').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
+          }
+        });
+      });
+    });
+
+    bodyEl.querySelectorAll('[data-team-delete]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const tid = Number(btn.getAttribute('data-team-delete'));
+        const name = btn.getAttribute('data-team-name');
+        openModal(`
+          <div class="modal-header">
+            <h3>Delete Team</h3>
+            <button type="button" class="modal-close" id="closeModalBtn">✕</button>
+          </div>
+          <p style="font-size:13.5px;color:#334155;">Delete team <strong>${esc(name)}</strong>? Team members will be unassigned from this team.</p>
+          <div id="umDelTeamErr" style="margin-top:10px;"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-outline" id="cancelModalBtn">Cancel</button>
+            <button type="button" class="btn btn-primary" style="background:#dc2626;" id="umConfirmTeamDelBtn">Delete Team</button>
+          </div>
+        `, false);
+        document.getElementById('umConfirmTeamDelBtn')?.addEventListener('click', async () => {
+          try {
+            const out = await api(`/api/um/teams/${tid}`, { method: 'DELETE' });
+            closeModal();
+            umState.toastFn(out.message);
+            await rerenderActiveContainer();
+          } catch (err) {
+            document.getElementById('umDelTeamErr').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
+          }
+        });
+      });
+    });
+
     document.getElementById('umTransferForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
@@ -1300,7 +1651,7 @@
           body: JSON.stringify({ user_id: fd.get('user_id'), team_id: fd.get('team_id') || null }),
         });
         umState.toastFn(res.message);
-        await renderView(umState.container);
+        await rerenderActiveContainer();
       } catch (err) {
         umState.toastFn(err.message);
       }
@@ -1344,7 +1695,7 @@
           : await api('/api/um/departments', { method: 'POST', body: JSON.stringify(payload) });
         closeModal();
         umState.toastFn(res.message);
-        await renderView(umState.container);
+        await rerenderActiveContainer();
       } catch (err) {
         document.getElementById('umDeptAlert').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
       }
@@ -1394,7 +1745,7 @@
           : await api('/api/um/teams', { method: 'POST', body: JSON.stringify(payload) });
         closeModal();
         umState.toastFn(res.message);
-        await renderView(umState.container);
+        await rerenderActiveContainer();
       } catch (err) {
         document.getElementById('umTeamAlert').innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
       }
@@ -1508,6 +1859,24 @@
               <div class="um-kv-item"><div class="um-kv-label">Joining / Created</div><div class="um-kv-val">${esc(fmtDate(u.created_at))}</div></div>
               <div class="um-kv-item" style="grid-column:1/-1;"><div class="um-kv-label">Last Login</div><div class="um-kv-val">${u.last_login_at ? esc(fmtDate(u.last_login_at)) : 'Never signed in'}</div></div>
             </div>
+
+            ${u.id === umState.user?.id ? `
+              <div class="um-change-pw-box" style="margin-top:16px;padding-top:14px;border-top:1px solid #e2e8f0;">
+                <h3 style="font-size:14px;font-weight:700;color:#0f2547;margin-bottom:8px;">Change My Password</h3>
+                <div id="umChangePwAlert"></div>
+                <form id="umChangePwForm" style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end;">
+                  <div class="form-group" style="margin-bottom:0;">
+                    <label>Current Password *</label>
+                    <input type="password" name="current_password" required placeholder="Current password" />
+                  </div>
+                  <div class="form-group" style="margin-bottom:0;">
+                    <label>New Password (min 8) *</label>
+                    <input type="password" name="new_password" minlength="8" required placeholder="New password" />
+                  </div>
+                  <button type="submit" class="btn btn-outline" style="height:38px;white-space:nowrap;">Update Password</button>
+                </form>
+              </div>
+            ` : ''}
           </div>
 
           <div class="panel-card">
@@ -1531,9 +1900,350 @@
       `;
 
       document.getElementById('umEditThisProfileBtn')?.addEventListener('click', () => openUserFormModal(u));
+      document.getElementById('umChangePwForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const alertEl = document.getElementById('umChangePwAlert');
+        try {
+          const out = await api('/api/auth/change-password', {
+            method: 'POST',
+            body: JSON.stringify({ current_password: fd.get('current_password'), new_password: fd.get('new_password') }),
+          });
+          alertEl.innerHTML = `<div class="um-alert um-alert-success">${esc(out.message)}</div>`;
+          e.target.reset();
+          umState.toastFn(out.message);
+        } catch (err) {
+          alertEl.innerHTML = `<div class="um-alert um-alert-error">${esc(err.message)}</div>`;
+        }
+      });
     } catch (err) {
       bodyEl.innerHTML = `<div class="panel-card"><div class="um-alert um-alert-error">${esc(err.message)}</div></div>`;
     }
+  }
+
+  // ---------------- TEAM & ROLES DIRECTORY (CONNECTED TO REAL DB) ----------------
+  async function renderTeamRolesView(container) {
+    umState.viewMode = 'team';
+    umState.container = container;
+    container.innerHTML = `<div class="panel-card"><div class="um-empty-state">Loading Team &amp; Roles from database...</div></div>`;
+
+    try {
+      await refreshAuthStatus();
+    } catch (err) {
+      container.innerHTML = `<div class="panel-card"><div class="um-alert um-alert-error">Unable to connect to backend API: ${esc(err.message)}</div></div>`;
+      return;
+    }
+
+    if (!umState.authenticated) {
+      renderAuthView();
+      return;
+    }
+
+    if (!can('team_roles', 'view') && !can('user_management', 'view')) {
+      container.innerHTML = `
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Access Restricted (403)</h2></div>
+            <button type="button" class="btn btn-outline" id="umTeamSignOutBtn">Sign Out (${esc(umState.user.full_name)})</button>
+          </div>
+          <div class="um-alert um-alert-error">
+            Your assigned role (<strong>${esc(umState.user.role_name)}</strong>) does not have permission to view Team &amp; Roles.
+          </div>
+        </div>
+      `;
+      document.getElementById('umTeamSignOutBtn')?.addEventListener('click', handleSignOut);
+      return;
+    }
+
+    try {
+      await Promise.all([loadCoreReferenceData(), loadTeamUsersTable()]);
+    } catch (err) {
+      container.innerHTML = `<div class="panel-card"><div class="um-alert um-alert-error">${esc(err.message)}</div></div>`;
+      return;
+    }
+
+    const d = umState.dashboard || {};
+    const q = umState.teamQuery;
+    const res = umState.teamUsersResult;
+    const pages = buildWindowedPages(res.page, res.total_pages);
+    const hasFilters = Boolean(q.q || q.role_id || q.department_id || q.team_id || q.status);
+
+    container.innerHTML = `
+      <section class="um-kpi-grid um-kpi-grid-5">
+        <div class="um-kpi-card accent-blue">
+          <div class="um-kpi-label">Total Members</div>
+          <div class="um-kpi-val">${d.total_users ?? 0}</div>
+          <div class="um-kpi-sub">Synced with User Directory</div>
+        </div>
+        <div class="um-kpi-card accent-green">
+          <div class="um-kpi-label">Active Members</div>
+          <div class="um-kpi-val">${d.active_users ?? 0}</div>
+          <div class="um-kpi-sub">Enabled accounts</div>
+        </div>
+        <div class="um-kpi-card accent-purple">
+          <div class="um-kpi-label">Configured Roles</div>
+          <div class="um-kpi-val">${d.total_roles ?? umState.roles.length}</div>
+          <div class="um-kpi-sub">${d.system_roles ?? 5} System • ${d.custom_roles ?? 0} Custom</div>
+        </div>
+        <div class="um-kpi-card accent-teal">
+          <div class="um-kpi-label">Departments</div>
+          <div class="um-kpi-val">${d.total_departments ?? umState.departments.length}</div>
+          <div class="um-kpi-sub">Active org units</div>
+        </div>
+        <div class="um-kpi-card accent-amber">
+          <div class="um-kpi-label">Teams</div>
+          <div class="um-kpi-val">${d.total_teams ?? umState.teams.length}</div>
+          <div class="um-kpi-sub">Working groups</div>
+        </div>
+      </section>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title"><h2>Team Members &amp; Role Assignments (${res.total})</h2></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${hasFilters ? `<button type="button" class="btn btn-outline" id="tmResetFiltersBtn">Reset Filters</button>` : ''}
+            ${can('user_management', 'create') ? `<button type="button" class="btn btn-primary" id="tmAddMemberBtn">+ Add Team Member</button>` : ''}
+            ${can('user_management', 'view') ? `<button type="button" class="btn btn-outline" id="tmOpenFullUmBtn">Full Access Control →</button>` : ''}
+          </div>
+        </div>
+
+        <div class="um-filters-row">
+          <input type="text" id="tmSearchInput" value="${esc(q.q)}" placeholder="Search member, email, employee ID..." />
+          <select id="tmFilterRole">
+            <option value="">All Roles</option>
+            ${umState.roles.map(r => `<option value="${r.id}" ${String(q.role_id) === String(r.id) ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+          </select>
+          <select id="tmFilterDept">
+            <option value="">All Departments</option>
+            ${umState.departments.map(dep => `<option value="${dep.id}" ${String(q.department_id) === String(dep.id) ? 'selected' : ''}>${esc(dep.name)}</option>`).join('')}
+          </select>
+          <select id="tmFilterTeam">
+            <option value="">All Teams</option>
+            ${umState.teams.map(t => `<option value="${t.id}" ${String(q.team_id) === String(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+          </select>
+          <select id="tmFilterStatus">
+            <option value="">All Statuses</option>
+            ${['Active', 'Inactive', 'Pending'].map(s => `<option value="${s}" ${q.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+          <select id="tmPageSizeSelect">
+            ${[5, 10, 25, 50].map(sz => `<option value="${sz}" ${Number(q.page_size) === sz ? 'selected' : ''}>${sz} / page</option>`).join('')}
+          </select>
+        </div>
+
+        ${res.items.length === 0 ? `
+          <div class="um-empty-state">
+            <h3>No matching team members</h3>
+            <p>Adjust your search filters or add a new team member.</p>
+          </div>
+        ` : `
+          <div class="table-no-scroll table-compact">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Member</th>
+                  <th>Role &amp; Designation</th>
+                  <th>Department &amp; Team</th>
+                  <th>Reporting Manager</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${res.items.map(u => `
+                  <tr>
+                    <td class="td-primary">
+                      <div class="followup-entity">
+                        ${renderAvatar(u)}
+                        <div class="entity-info">
+                          <div class="entity-name">${esc(u.full_name)}</div>
+                          <div class="entity-sub">${esc(u.email)} • ${esc(u.employee_id)}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <strong>${esc(u.role_name)}</strong>
+                      <div class="entity-sub">${esc(u.designation || 'Team Member')}</div>
+                    </td>
+                    <td>
+                      <div>${esc(u.department_name || 'Unassigned')}</div>
+                      <div class="entity-sub">${esc(u.team_name || 'No Team')}</div>
+                    </td>
+                    <td>${esc(u.reporting_manager_name || '—')}</td>
+                    <td>${statusBadge(u.status)}</td>
+                    <td class="td-action">
+                      <div class="followup-actions" style="gap:5px;flex-wrap:wrap;">
+                        ${can('user_management', 'edit') ? `<button type="button" class="action-pill-btn pill-blue" data-tm-edit="${u.id}">Edit / Role</button>` : ''}
+                        <button type="button" class="action-pill-btn" data-tm-profile="${u.id}">Profile</button>
+                      </div>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="pagination-bar">
+            <div class="pagination-info">
+              <span>Showing <strong>${res.items.length}</strong> of <strong>${res.total}</strong> members (Page <strong>${res.page}</strong> of <strong>${res.total_pages}</strong>)</span>
+            </div>
+            <div class="pagination-controls">
+              <button class="page-btn" id="tmPrevBtn" ${res.page <= 1 ? 'disabled' : ''}>‹ Prev</button>
+              ${pages.map(p => p === '...'
+                ? `<span class="page-ellipsis">…</span>`
+                : `<button class="page-btn ${p === res.page ? 'active' : ''}" data-tm-page="${p}">${p}</button>`
+              ).join('')}
+              <button class="page-btn" id="tmNextBtn" ${res.page >= res.total_pages ? 'disabled' : ''}>Next ›</button>
+            </div>
+          </div>
+        `}
+      </div>
+
+      <div class="um-split-2">
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Roles &amp; Access Control (${umState.roles.length})</h2></div>
+            ${can('user_management', 'create') ? `<button type="button" class="btn btn-outline" id="tmCreateRoleBtn">+ Create Role</button>` : ''}
+          </div>
+          <div class="table-no-scroll table-compact">
+            <table class="data-table">
+              <thead><tr><th>Role</th><th>Members</th><th>Permissions</th><th>Actions</th></tr></thead>
+              <tbody>
+                ${umState.roles.map(r => {
+                  const counts = countRolePermissions(r.permissions);
+                  return `
+                  <tr>
+                    <td class="td-primary"><strong>${esc(r.name)}</strong><div class="entity-sub">${r.is_system ? 'System Role' : 'Custom Role'}</div></td>
+                    <td><strong>${r.user_count}</strong></td>
+                    <td><span class="status-badge badge-onboarded">${counts.modulesWithView}/${umState.modules.length} modules</span></td>
+                    <td>
+                      ${can('user_management', 'edit') && r.slug !== 'super_admin'
+                        ? `<button type="button" class="action-pill-btn" data-tm-role-edit="${r.id}">Configure</button>`
+                        : `<span class="entity-sub">${r.slug === 'super_admin' ? 'Full Access' : 'Read Only'}</span>`}
+                    </td>
+                  </tr>
+                `; }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel-card">
+          <div class="panel-header">
+            <div class="panel-title"><h2>Departments (${umState.departments.length}) &amp; Teams (${umState.teams.length})</h2></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              ${can('user_management', 'create') ? `<button type="button" class="btn btn-outline" id="tmAddDeptBtn">+ Dept</button>` : ''}
+              ${can('user_management', 'create') ? `<button type="button" class="btn btn-outline" id="tmAddTeamBtn">+ Team</button>` : ''}
+            </div>
+          </div>
+          ${umState.departments.length === 0 && umState.teams.length === 0 ? `
+            <div class="um-empty-state"><p>No departments or teams created yet. Click + Dept or + Team to organize your CRM staff.</p></div>
+          ` : `
+            <div class="ledger-list" style="max-height:320px;">
+              ${umState.departments.map(dep => `
+                <div class="ledger-item">
+                  <div>
+                    <strong>🏢 ${esc(dep.name)}</strong> <span class="template-code">${esc(dep.code)}</span>
+                    <div class="entity-sub">Head: ${esc(dep.head_name || 'Unassigned')} • <strong>${dep.employee_count}</strong> employees</div>
+                  </div>
+                  ${can('user_management', 'edit') ? `<button type="button" class="action-pill-btn" data-tm-dept-edit="${dep.id}">Edit</button>` : ''}
+                </div>
+              `).join('')}
+              ${umState.teams.map(t => `
+                <div class="ledger-item">
+                  <div>
+                    <strong>👥 ${esc(t.name)}</strong>
+                    <div class="entity-sub">${esc(t.department_name || 'General')} • Lead: ${esc(t.manager_name || 'Unassigned')} • <strong>${t.member_count}</strong> members</div>
+                  </div>
+                  ${can('user_management', 'edit') ? `<button type="button" class="action-pill-btn" data-tm-team-edit="${t.id}">Edit</button>` : ''}
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+
+    let tmTimer;
+    document.getElementById('tmSearchInput')?.addEventListener('input', (e) => {
+      clearTimeout(tmTimer);
+      umState.teamQuery.q = e.target.value;
+      umState.teamQuery.page = 1;
+      tmTimer = setTimeout(async () => {
+        await renderTeamRolesView(container);
+        const inp = document.getElementById('tmSearchInput');
+        if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+      }, 240);
+    });
+    const bindTmSel = (id, key) => {
+      document.getElementById(id)?.addEventListener('change', (e) => {
+        umState.teamQuery[key] = key === 'page_size' ? Number(e.target.value) : e.target.value;
+        umState.teamQuery.page = 1;
+        renderTeamRolesView(container);
+      });
+    };
+    bindTmSel('tmFilterRole', 'role_id');
+    bindTmSel('tmFilterDept', 'department_id');
+    bindTmSel('tmFilterTeam', 'team_id');
+    bindTmSel('tmFilterStatus', 'status');
+    bindTmSel('tmPageSizeSelect', 'page_size');
+
+    document.getElementById('tmResetFiltersBtn')?.addEventListener('click', () => {
+      umState.teamQuery = { ...umState.teamQuery, q: '', role_id: '', department_id: '', team_id: '', status: '', page: 1 };
+      renderTeamRolesView(container);
+    });
+    document.getElementById('tmPrevBtn')?.addEventListener('click', () => {
+      umState.teamQuery.page = Math.max(1, umState.teamQuery.page - 1);
+      renderTeamRolesView(container);
+    });
+    document.getElementById('tmNextBtn')?.addEventListener('click', () => {
+      umState.teamQuery.page = Math.min(res.total_pages, umState.teamQuery.page + 1);
+      renderTeamRolesView(container);
+    });
+    container.querySelectorAll('[data-tm-page]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        umState.teamQuery.page = Number(btn.getAttribute('data-tm-page'));
+        renderTeamRolesView(container);
+      });
+    });
+
+    document.getElementById('tmAddMemberBtn')?.addEventListener('click', () => openUserFormModal(null));
+    document.getElementById('tmCreateRoleBtn')?.addEventListener('click', () => openRoleModal(null));
+    document.getElementById('tmAddDeptBtn')?.addEventListener('click', () => openDeptModal(null));
+    document.getElementById('tmAddTeamBtn')?.addEventListener('click', () => openTeamModal(null));
+    document.getElementById('tmOpenFullUmBtn')?.addEventListener('click', () => {
+      document.querySelector('.sidebar-nav [data-view="user-management"]')?.click();
+    });
+
+    container.querySelectorAll('[data-tm-edit]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const u = res.items.find(x => x.id === Number(btn.getAttribute('data-tm-edit')));
+        if (u) openUserFormModal(u);
+      });
+    });
+    container.querySelectorAll('[data-tm-profile]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        umState.profileUserId = Number(btn.getAttribute('data-tm-profile'));
+        umState.activeTab = 'profile';
+        document.querySelector('.sidebar-nav [data-view="user-management"]')?.click();
+      });
+    });
+    container.querySelectorAll('[data-tm-role-edit]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const r = umState.roles.find(x => x.id === Number(btn.getAttribute('data-tm-role-edit')));
+        if (r) openRoleModal(r);
+      });
+    });
+    container.querySelectorAll('[data-tm-dept-edit]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const dep = umState.departments.find(x => x.id === Number(btn.getAttribute('data-tm-dept-edit')));
+        if (dep) openDeptModal(dep);
+      });
+    });
+    container.querySelectorAll('[data-tm-team-edit]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const t = umState.teams.find(x => x.id === Number(btn.getAttribute('data-tm-team-edit')));
+        if (t) openTeamModal(t);
+      });
+    });
   }
 
   const VIEW_TO_MODULE = {
@@ -1563,9 +2273,24 @@
       refreshAuthStatus().catch(() => {});
     },
     renderView,
+    renderTeamRolesView,
     parseHashAction,
     setActiveTab(tab) {
       umState.activeTab = tab || 'users';
+    },
+    getCurrentUser() {
+      return umState.authenticated ? umState.user : null;
+    },
+    getAuthState() {
+      return {
+        authenticated: umState.authenticated,
+        needsSetup: umState.needsSetup,
+        user: umState.user,
+        permissions: umState.permissions,
+      };
+    },
+    async logout() {
+      await handleSignOut();
     },
     checkViewAccess(viewKey, containerEl) {
       if (!umState.authenticated || !umState.user) return true;
