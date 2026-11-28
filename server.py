@@ -32,6 +32,25 @@ def slugify(text: str) -> str:
     return SLUG_RE.sub("_", text.strip().lower()).strip("_") or f"role_{secrets.token_hex(3)}"
 
 
+def extract_raw_token(val: str) -> str:
+    """Extract raw token whether user enters a raw token or pastes a full invite/reset URL."""
+    s = (val or "").strip()
+    if not s:
+        return ""
+    if "token=" in s:
+        # Handle both full URLs (#activate?token=...) and query substrings
+        q_part = s.split("?", 1)[1] if "?" in s else s
+        if "#" in q_part and "token=" in q_part.split("#", 1)[1]:
+            q_part = q_part.split("#", 1)[1]
+            if "?" in q_part:
+                q_part = q_part.split("?", 1)[1]
+        parsed_q = parse_qs(q_part)
+        tok = (parsed_q.get("token", [""])[0] or "").strip()
+        if tok:
+            return tok
+    return s
+
+
 def save_avatar_data_url(data_url: str, employee_id: str) -> str:
     """Validate and save a base64 image data URL under uploads/avatars/."""
     if not data_url:
@@ -164,6 +183,22 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
             return None, None
         return user, perms
 
+    def require_any_view_permission(self, conn, modules=("user_management", "team_roles")):
+        """Allow read access when user holds 'view' permission on any listed module."""
+        user, perms = self.get_current_auth(conn)
+        if not user:
+            self.send_json(401, {"error": "Authentication required. Please sign in."})
+            return None, None
+        if user["role_slug"] == "super_admin":
+            return user, perms
+        if any(bool(perms.get(m, {}).get("view", False)) for m in modules):
+            return user, perms
+        self.send_json(
+            403,
+            {"error": f"Access denied. Your role ({user['role_name']}) lacks 'view' permission for User Management / Team & Roles."},
+        )
+        return None, None
+
     def make_session_cookie(self, raw_token: str, clear: bool = False) -> str:
         if clear:
             return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
@@ -262,10 +297,17 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                 return self.handle_auth_logout(conn)
             if path == "/api/auth/activate":
                 return self.handle_auth_activate(conn)
+            if path == "/api/auth/request-reset":
+                return self.handle_auth_request_reset(conn)
             if path == "/api/auth/reset-password":
                 return self.handle_auth_reset_password(conn)
+            if path == "/api/auth/change-password":
+                return self.handle_auth_change_password(conn)
             if path == "/api/um/users":
                 return self.handle_create_user(conn)
+            if re.match(r"^/api/um/users/\d+/resend-invite$", path):
+                uid = int(path.split("/")[4])
+                return self.handle_user_resend_invite(conn, uid)
             if re.match(r"^/api/um/users/\d+/reset-password$", path):
                 uid = int(path.split("/")[4])
                 return self.handle_admin_reset_link(conn, uid)
@@ -349,6 +391,15 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
             if re.match(r"^/api/um/users/\d+$", path):
                 uid = int(path.rsplit("/", 1)[1])
                 return self.handle_delete_user(conn, uid)
+            if re.match(r"^/api/um/roles/\d+$", path):
+                rid = int(path.rsplit("/", 1)[1])
+                return self.handle_delete_role(conn, rid)
+            if re.match(r"^/api/um/departments/\d+$", path):
+                did = int(path.rsplit("/", 1)[1])
+                return self.handle_delete_department(conn, did)
+            if re.match(r"^/api/um/teams/\d+$", path):
+                tid = int(path.rsplit("/", 1)[1])
+                return self.handle_delete_team(conn, tid)
             self.send_json(404, {"error": "API endpoint not found."})
         except Exception as exc:
             self.send_json(500, {"error": f"Server error: {exc}"})
@@ -531,7 +582,7 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
 
     def handle_auth_activate(self, conn):
         body = self.read_json_body()
-        raw_token = (body.get("token") or "").strip()
+        raw_token = extract_raw_token(body.get("token") or "")
         password = body.get("password") or ""
         if not raw_token:
             raise ValueError("Activation token is required.")
@@ -560,11 +611,58 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                 conn, row["id"], row["full_name"], "ACCOUNT_ACTIVATED", "auth",
                 str(row["id"]), f"Account activated via invitation ({row['email']})", self.client_ip(),
             )
-        self.send_json(200, {"message": "Account activated! You can now sign in with your email and password."})
+        self.send_json(200, {
+            "message": "Account activated! You can now sign in with your email and password.",
+            "email": row["email"],
+            "full_name": row["full_name"],
+        })
+
+    def handle_auth_request_reset(self, conn):
+        body = self.read_json_body()
+        email = (body.get("email") or "").strip().lower()
+        if not email or not EMAIL_RE.match(email):
+            raise ValueError("Please enter a valid registered email address.")
+
+        row = conn.execute(f"{USER_SELECT_SQL} WHERE lower(u.email) = ?", (email,)).fetchone()
+        if not row:
+            self.send_json(404, {"error": "No account found with that email address."})
+            return
+        if row["status"] == "Inactive":
+            self.send_json(403, {"error": "This account is deactivated. Contact your administrator to reactivate it."})
+            return
+        if row["status"] == "Pending":
+            self.send_json(400, {"error": "Account is still Pending activation. Use your invitation link to set your initial password."})
+            return
+
+        raw_token, token_hash = db.generate_secure_token()
+        expires_at = db.utc_future_iso(2)
+        with conn:
+            conn.execute(
+                "UPDATE users SET reset_token_hash = ?, reset_expires_at = ?, updated_at = ? WHERE id = ?",
+                (token_hash, expires_at, db.utc_now_iso(), row["id"]),
+            )
+            db.log_activity(
+                conn, row["id"], row["full_name"], "PASSWORD_RESET_REQUESTED", "auth",
+                str(row["id"]), f"Self-service password reset requested for {row['email']}", self.client_ip(),
+            )
+        host = self.headers.get("Host", "127.0.0.1:8000")
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "message": f"Password reset token generated for {row['full_name']} (expires in 2 hours).",
+                "reset_token": raw_token,
+                "reset_link": f"http://{host}/#reset-password?token={raw_token}",
+                "expires_at": expires_at,
+                "user_name": row["full_name"],
+                "email_sent": False,
+                "email_note": "SMTP email service is not configured. Use the generated reset token below to set your new password.",
+            },
+        )
 
     def handle_auth_reset_password(self, conn):
         body = self.read_json_body()
-        raw_token = (body.get("token") or "").strip()
+        raw_token = extract_raw_token(body.get("token") or "")
         new_password = body.get("new_password") or ""
         if not raw_token:
             raise ValueError("Reset token is required.")
@@ -593,11 +691,42 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                 conn, row["id"], row["full_name"], "PASSWORD_RESET_COMPLETED", "auth",
                 str(row["id"]), f"Password reset completed for {row['email']}", self.client_ip(),
             )
-        self.send_json(200, {"message": "Password updated successfully. Please sign in with your new password."})
+        self.send_json(200, {
+            "message": "Password updated successfully. Please sign in with your new password.",
+            "email": row["email"],
+        })
+
+    def handle_auth_change_password(self, conn):
+        user, _ = self.get_current_auth(conn)
+        if not user:
+            self.send_json(401, {"error": "Authentication required."})
+            return
+        body = self.read_json_body()
+        current_password = body.get("current_password") or ""
+        new_password = body.get("new_password") or ""
+        if not current_password or not new_password:
+            raise ValueError("Current password and new password are required.")
+        if len(new_password) < 8:
+            raise ValueError("New password must be at least 8 characters long.")
+        row = conn.execute("SELECT password_hash, password_salt FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if not row or not db.verify_password(current_password, row["password_hash"], row["password_salt"]):
+            self.send_json(400, {"error": "Current password is incorrect."})
+            return
+        pw_hash, pw_salt = db.hash_password(new_password)
+        with conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?",
+                (pw_hash, pw_salt, db.utc_now_iso(), user["id"]),
+            )
+            db.log_activity(
+                conn, user["id"], user["full_name"], "PASSWORD_CHANGED", "auth",
+                str(user["id"]), f"Changed own password ({user['email']})", self.client_ip(),
+            )
+        self.send_json(200, {"ok": True, "message": "Your password has been updated."})
 
     # ---------------- DASHBOARD SUMMARY ----------------
     def handle_um_dashboard(self, conn):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         row = conn.execute(
@@ -613,6 +742,17 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
             JOIN roles r ON r.id = u.role_id
             """
         ).fetchone()
+        role_row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS total_roles,
+                SUM(CASE WHEN is_system = 1 THEN 1 ELSE 0 END) AS system_roles,
+                SUM(CASE WHEN is_system = 0 THEN 1 ELSE 0 END) AS custom_roles
+            FROM roles
+            """
+        ).fetchone()
+        dept_cnt = conn.execute("SELECT COUNT(*) AS cnt FROM departments").fetchone()["cnt"]
+        team_cnt = conn.execute("SELECT COUNT(*) AS cnt FROM teams").fetchone()["cnt"]
         self.send_json(
             200,
             {
@@ -622,6 +762,11 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                 "pending_invitations": int(row["pending_invitations"] or 0),
                 "administrators": int(row["administrators"] or 0),
                 "employees": int(row["employees"] or 0),
+                "total_roles": int((role_row["total_roles"] if role_row else 0) or 0),
+                "system_roles": int((role_row["system_roles"] if role_row else 0) or 0),
+                "custom_roles": int((role_row["custom_roles"] if role_row else 0) or 0),
+                "total_departments": int(dept_cnt or 0),
+                "total_teams": int(team_cnt or 0),
             },
         )
 
@@ -654,7 +799,7 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
         return clause, params
 
     def handle_list_users(self, conn, qs: dict):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         clause, params = self._build_users_filter(qs)
@@ -736,7 +881,11 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
         if not auth_user:
             self.send_json(401, {"error": "Authentication required."})
             return
-        can_view_any = auth_user["role_slug"] == "super_admin" or bool(perms.get("user_management", {}).get("view"))
+        can_view_any = (
+            auth_user["role_slug"] == "super_admin"
+            or bool(perms.get("user_management", {}).get("view"))
+            or bool(perms.get("team_roles", {}).get("view"))
+        )
         if not can_view_any and auth_user["id"] != uid:
             self.send_json(403, {"error": "Access denied."})
             return
@@ -926,32 +1075,64 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                     return
 
         avatar_url = save_avatar_data_url(avatar_data, employee_id) if avatar_data else (target["avatar_url"] or "")
+        new_password = (body.get("password") or "") if can_edit_any else ""
+        if new_password and len(new_password) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+        if status == "Active" and not target["password_hash"] and not new_password:
+            raise ValueError("Cannot set status to Active until the user sets a password via their invitation link, or you enter a password below.")
+
         now = db.utc_now_iso()
 
         with conn:
-            conn.execute(
-                """
-                UPDATE users
-                SET full_name = ?, email = ?, mobile = ?, employee_id = ?, avatar_url = ?,
-                    department_id = ?, designation = ?, role_id = ?, team_id = ?,
-                    reporting_manager_id = ?, status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    full_name, email, mobile, employee_id, avatar_url,
-                    int(department_id) if department_id else None,
-                    designation, role_id,
-                    int(team_id) if team_id else None,
-                    int(reporting_manager_id) if reporting_manager_id else None,
-                    status, now, uid,
-                ),
-            )
+            if new_password:
+                pw_hash, pw_salt = db.hash_password(new_password)
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET full_name = ?, email = ?, mobile = ?, employee_id = ?, avatar_url = ?,
+                        department_id = ?, designation = ?, role_id = ?, team_id = ?,
+                        reporting_manager_id = ?, status = ?, password_hash = ?, password_salt = ?,
+                        invite_token_hash = '', invite_expires_at = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        full_name, email, mobile, employee_id, avatar_url,
+                        int(department_id) if department_id else None,
+                        designation, role_id,
+                        int(team_id) if team_id else None,
+                        int(reporting_manager_id) if reporting_manager_id else None,
+                        status, pw_hash, pw_salt, now, uid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET full_name = ?, email = ?, mobile = ?, employee_id = ?, avatar_url = ?,
+                        department_id = ?, designation = ?, role_id = ?, team_id = ?,
+                        reporting_manager_id = ?, status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        full_name, email, mobile, employee_id, avatar_url,
+                        int(department_id) if department_id else None,
+                        designation, role_id,
+                        int(team_id) if team_id else None,
+                        int(reporting_manager_id) if reporting_manager_id else None,
+                        status, now, uid,
+                    ),
+                )
             if status != "Active":
                 conn.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
             if role_id != target["role_id"]:
                 db.log_activity(
                     conn, actor["id"], actor["full_name"], "ROLE_CHANGED", "user_management",
                     str(uid), f"Changed role of {full_name} from {target['role_name']} to {new_role['name']}", self.client_ip(),
+                )
+            elif new_password:
+                db.log_activity(
+                    conn, actor["id"], actor["full_name"], "PASSWORD_SET_BY_ADMIN", "user_management",
+                    str(uid), f"Updated profile & password for {full_name} ({employee_id})", self.client_ip(),
                 )
             else:
                 db.log_activity(
@@ -984,9 +1165,26 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "Cannot deactivate the last active Super Admin account."})
                 return
 
+        opt_password = body.get("password") or ""
+        if new_status == "Active" and not target["password_hash"] and not opt_password:
+            self.send_json(
+                400,
+                {"error": "This user has not completed invitation setup yet (no password set). Use 'Invite Link' to activate or set a password in Edit User."},
+            )
+            return
+        if opt_password and len(opt_password) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+
         now = db.utc_now_iso()
         with conn:
-            conn.execute("UPDATE users SET status = ?, updated_at = ? WHERE id = ?", (new_status, now, uid))
+            if opt_password:
+                pw_hash, pw_salt = db.hash_password(opt_password)
+                conn.execute(
+                    "UPDATE users SET status = ?, password_hash = ?, password_salt = ?, invite_token_hash = '', invite_expires_at = ?, updated_at = ? WHERE id = ?",
+                    (new_status, pw_hash, pw_salt, "", now, uid),
+                )
+            else:
+                conn.execute("UPDATE users SET status = ?, updated_at = ? WHERE id = ?", (new_status, now, uid))
             if new_status != "Active":
                 conn.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
             action = "USER_ACTIVATED" if new_status == "Active" else "USER_DEACTIVATED"
@@ -998,6 +1196,44 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
 
         updated = conn.execute(f"{USER_SELECT_SQL} WHERE u.id = ?", (uid,)).fetchone()
         self.send_json(200, {"message": f"User {target['full_name']} is now {new_status}.", "user": db.serialize_user_row(updated)})
+
+    def handle_user_resend_invite(self, conn, uid: int):
+        actor, _ = self.require_permission(conn, "user_management", "edit")
+        if not actor:
+            return
+        target = conn.execute(f"{USER_SELECT_SQL} WHERE u.id = ?", (uid,)).fetchone()
+        if not target:
+            self.send_json(404, {"error": "User not found."})
+            return
+        if target["role_slug"] == "super_admin" and actor["role_slug"] != "super_admin":
+            self.send_json(403, {"error": "Only a Super Admin can manage another Super Admin."})
+            return
+
+        raw_token, token_hash = db.generate_secure_token()
+        expires_at = db.utc_future_iso(72)
+        next_status = "Pending" if not target["password_hash"] else target["status"]
+        with conn:
+            conn.execute(
+                "UPDATE users SET invite_token_hash = ?, invite_expires_at = ?, status = ?, updated_at = ? WHERE id = ?",
+                (token_hash, expires_at, next_status, db.utc_now_iso(), uid),
+            )
+            db.log_activity(
+                conn, actor["id"], actor["full_name"], "INVITE_LINK_GENERATED", "user_management",
+                str(uid), f"Generated fresh 72h activation invite link for {target['email']}", self.client_ip(),
+            )
+        host = self.headers.get("Host", "127.0.0.1:8000")
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "message": f"Activation invite link generated for {target['full_name']} (expires in 72 hours).",
+                "activation_token": raw_token,
+                "activation_link": f"http://{host}/#activate?token={raw_token}",
+                "expires_at": expires_at,
+                "email_sent": False,
+                "email_note": "Email service (SMTP) is not configured. Share this one-time activation link securely with the employee.",
+            },
+        )
 
     def handle_admin_reset_link(self, conn, uid: int):
         actor, _ = self.require_permission(conn, "user_management", "edit")
@@ -1064,7 +1300,7 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
 
     # ---------------- ROLES & PERMISSIONS ----------------
     def handle_list_roles(self, conn):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         rows = conn.execute(
@@ -1093,7 +1329,7 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
         )
 
     def handle_role_users(self, conn, rid: int):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         rows = conn.execute(f"{USER_SELECT_SQL} WHERE u.role_id = ? ORDER BY u.full_name ASC", (rid,)).fetchall()
@@ -1206,9 +1442,33 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
             )
         self.send_json(200, {"message": f"Role '{name}' updated."})
 
+    def handle_delete_role(self, conn, rid: int):
+        actor, _ = self.require_permission(conn, "user_management", "delete")
+        if not actor:
+            return
+        role = conn.execute("SELECT * FROM roles WHERE id = ?", (rid,)).fetchone()
+        if not role:
+            self.send_json(404, {"error": "Role not found."})
+            return
+        if role["is_system"]:
+            self.send_json(400, {"error": "System roles cannot be deleted."})
+            return
+        assigned = conn.execute("SELECT COUNT(*) AS cnt FROM users WHERE role_id = ?", (rid,)).fetchone()["cnt"]
+        if assigned > 0:
+            self.send_json(400, {"error": f"Cannot delete role '{role['name']}' while {assigned} user(s) are assigned to it. Reassign those users first."})
+            return
+        with conn:
+            conn.execute("DELETE FROM role_permissions WHERE role_id = ?", (rid,))
+            conn.execute("DELETE FROM roles WHERE id = ?", (rid,))
+            db.log_activity(
+                conn, actor["id"], actor["full_name"], "ROLE_DELETED", "user_management",
+                str(rid), f"Deleted custom role '{role['name']}'", self.client_ip(),
+            )
+        self.send_json(200, {"ok": True, "message": f"Custom role '{role['name']}' deleted."})
+
     # ---------------- DEPARTMENTS & TEAMS ----------------
     def handle_list_departments(self, conn):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         rows = conn.execute(
@@ -1224,7 +1484,7 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
         self.send_json(200, {"departments": [dict(r) for r in rows]})
 
     def handle_department_users(self, conn, did: int):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         rows = conn.execute(f"{USER_SELECT_SQL} WHERE u.department_id = ? ORDER BY u.full_name ASC", (did,)).fetchall()
@@ -1292,8 +1552,26 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
             )
         self.send_json(200, {"message": f"Department '{name}' updated."})
 
+    def handle_delete_department(self, conn, did: int):
+        actor, _ = self.require_permission(conn, "user_management", "delete")
+        if not actor:
+            return
+        dept = conn.execute("SELECT * FROM departments WHERE id = ?", (did,)).fetchone()
+        if not dept:
+            self.send_json(404, {"error": "Department not found."})
+            return
+        with conn:
+            conn.execute("UPDATE users SET department_id = NULL WHERE department_id = ?", (did,))
+            conn.execute("UPDATE teams SET department_id = NULL WHERE department_id = ?", (did,))
+            conn.execute("DELETE FROM departments WHERE id = ?", (did,))
+            db.log_activity(
+                conn, actor["id"], actor["full_name"], "DEPARTMENT_DELETED", "user_management",
+                str(did), f"Deleted department '{dept['name']}' ({dept['code']})", self.client_ip(),
+            )
+        self.send_json(200, {"ok": True, "message": f"Department '{dept['name']}' deleted."})
+
     def handle_list_teams(self, conn):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         rows = conn.execute(
@@ -1310,7 +1588,7 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
         self.send_json(200, {"teams": [dict(r) for r in rows]})
 
     def handle_team_users(self, conn, tid: int):
-        user, _ = self.require_permission(conn, "user_management", "view")
+        user, _ = self.require_any_view_permission(conn, ("user_management", "team_roles"))
         if not user:
             return
         rows = conn.execute(f"{USER_SELECT_SQL} WHERE u.team_id = ? ORDER BY u.full_name ASC", (tid,)).fetchall()
@@ -1384,6 +1662,23 @@ class CRMRequestHandler(BaseHTTPRequestHandler):
                 str(tid), f"Updated team '{name}'", self.client_ip(),
             )
         self.send_json(200, {"message": f"Team '{name}' updated."})
+
+    def handle_delete_team(self, conn, tid: int):
+        actor, _ = self.require_permission(conn, "user_management", "delete")
+        if not actor:
+            return
+        team = conn.execute("SELECT * FROM teams WHERE id = ?", (tid,)).fetchone()
+        if not team:
+            self.send_json(404, {"error": "Team not found."})
+            return
+        with conn:
+            conn.execute("UPDATE users SET team_id = NULL WHERE team_id = ?", (tid,))
+            conn.execute("DELETE FROM teams WHERE id = ?", (tid,))
+            db.log_activity(
+                conn, actor["id"], actor["full_name"], "TEAM_DELETED", "user_management",
+                str(tid), f"Deleted team '{team['name']}'", self.client_ip(),
+            )
+        self.send_json(200, {"ok": True, "message": f"Team '{team['name']}' deleted."})
 
     def handle_transfer_team(self, conn):
         actor, _ = self.require_permission(conn, "user_management", "assign")
